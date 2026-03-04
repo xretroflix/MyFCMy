@@ -1,0 +1,12 @@
+cat > ~/TelethonForwarder/.gitignore << 'EOF'
+*.session
+*.session-journal
+.env
+.env.local
+forwarder_data.json
+data/
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+EOF
