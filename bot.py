@@ -1,4 +1,3 @@
-cat > ~/TelethonForwarder/bot.py << 'EOF'
 #!/usr/bin/env python3
 """
 Safe Telethon Forwarder v2.0 - Railway Edition
