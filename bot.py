@@ -141,36 +141,30 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update):
         return
     
-    text = """**MyFC Forwarder v3.0**
-
-**QUICK SETUP (One Command):**
-`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`
-
-Example:
-`/quicksetup movies -100111 -100222 15 5 photos,videos`
-
-**Content options:** photos, videos, audio, docs, links
-
-**OPTIONAL SETTINGS:**
-`/interval NAME 20 10`
-`/content NAME photos,videos`
-`/caption NAME Your text here`
-`/limit NAME 80`
-
-**CONTROL:**
-`/go` - Start all
-`/stop` - Stop all
-`/go NAME` - Start one
-`/stop NAME` - Stop one
-
-**INFO:**
-`/list` - All channels
-`/info NAME` - Channel details
-`/stats` - Daily counts
-
-**MANAGE:**
-`/remove NAME` - Delete channel
-"""
+    text = (
+        "*MyFC Forwarder v3.0*\n\n"
+        "*QUICK SETUP (One Command):*\n"
+        "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
+        "Example:\n"
+        "`/quicksetup movies -100111 -100222 15 5 photos,videos`\n\n"
+        "*Content options:* photos, videos, audio, docs, links\n\n"
+        "*OPTIONAL SETTINGS:*\n"
+        "`/interval NAME 20 10`\n"
+        "`/content NAME photos,videos`\n"
+        "`/caption NAME Your text here`\n"
+        "`/limit NAME 80`\n\n"
+        "*CONTROL:*\n"
+        "`/go` - Start all\n"
+        "`/stop` - Stop all\n"
+        "`/go NAME` - Start one\n"
+        "`/stop NAME` - Stop one\n\n"
+        "*INFO:*\n"
+        "`/list` - All channels\n"
+        "`/info NAME` - Channel details\n"
+        "`/stats` - Daily counts\n\n"
+        "*MANAGE:*\n"
+        "`/remove NAME` - Delete channel"
+    )
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
@@ -180,12 +174,12 @@ async def quicksetup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if len(context.args) < 6:
         await update.message.reply_text(
-            "**Usage:**\n"
+            "*Usage:*\n"
             "`/quicksetup NAME SOURCE DEST INTERVAL VARIATION CONTENT`\n\n"
-            "**Example:**\n"
+            "*Example:*\n"
             "`/quicksetup mymovies -100111111111 -100222222222 15 5 photos,videos`\n\n"
-            "**Content options:** photos, videos, audio, docs, links\n\n"
-            "**Interval examples:**\n"
+            "*Content options:* photos, videos, audio, docs, links\n\n"
+            "*Interval examples:*\n"
             "15 5 = every 15 min (range 10-20)\n"
             "30 10 = every 30 min (range 20-40)\n"
             "60 15 = every 60 min (range 45-75)",
@@ -230,14 +224,14 @@ async def quicksetup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         max_int = interval + variation
         
         await update.message.reply_text(
-            f"**Channel `{name}` created!**\n\n"
+            f"*Channel `{name}` created!*\n\n"
             f"Source: `{source}`\n"
             f"Dest: `{dest}`\n"
             f"Interval: {interval} min (range {min_int}-{max_int})\n"
             f"Content: {', '.join(content_types)}\n"
             f"Daily limit: {DEFAULT_LIMIT}\n\n"
-            f"**Start with:** `/go {name}`\n\n"
-            f"**Optional:**\n"
+            f"*Start with:* `/go {name}`\n\n"
+            f"*Optional:*\n"
             f"`/caption {name} Your text`\n"
             f"`/limit {name} 80`",
             parse_mode='Markdown'
@@ -253,8 +247,8 @@ async def interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if len(context.args) < 3:
         await update.message.reply_text(
-            "**Usage:** `/interval NAME BASE VARIATION`\n\n"
-            "**Examples:**\n"
+            "*Usage:* `/interval NAME BASE VARIATION`\n\n"
+            "*Examples:*\n"
             "`/interval ch1 15 5` = 10-20 min\n"
             "`/interval ch1 30 10` = 20-40 min\n"
             "`/interval ch1 60 15` = 45-75 min",
@@ -280,7 +274,7 @@ async def interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data()
         
         await update.message.reply_text(
-            f"**Interval set for `{name}`**\n\n"
+            f"*Interval set for `{name}`*\n\n"
             f"Base: {base} min\n"
             f"Variation: +/-{var} min\n"
             f"Range: {base-var}-{base+var} min",
@@ -296,9 +290,9 @@ async def content_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if len(context.args) < 2:
         await update.message.reply_text(
-            "**Usage:** `/content NAME types`\n\n"
-            "**Types:** photos, videos, audio, docs, links\n\n"
-            "**Examples:**\n"
+            "*Usage:* `/content NAME types`\n\n"
+            "*Types:* photos, videos, audio, docs, links\n\n"
+            "*Examples:*\n"
             "`/content ch1 photos,videos`\n"
             "`/content ch1 videos`\n"
             "`/content ch1 photos,videos,audio`",
@@ -323,7 +317,7 @@ async def content_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data()
     
     await update.message.reply_text(
-        f"**Content set for `{name}`**\n\nTypes: {', '.join(types)}",
+        f"*Content set for `{name}`*\n\nTypes: {', '.join(types)}",
         parse_mode='Markdown'
     )
 
@@ -334,8 +328,8 @@ async def caption_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if len(context.args) < 2:
         await update.message.reply_text(
-            "**Usage:** `/caption NAME Your text here`\n\n"
-            "**Clear:** `/caption NAME clear`",
+            "*Usage:* `/caption NAME Your text here`\n\n"
+            "*Clear:* `/caption NAME clear`",
             parse_mode='Markdown'
         )
         return
@@ -354,7 +348,7 @@ async def caption_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         CHANNELS[name]['caption'] = caption
         save_data()
-        await update.message.reply_text(f"**Caption set for `{name}`**\n\n{caption}", parse_mode='Markdown')
+        await update.message.reply_text(f"*Caption set for `{name}`*\n\n{caption}", parse_mode='Markdown')
 
 
 async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -362,7 +356,7 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if len(context.args) < 2:
-        await update.message.reply_text("**Usage:** `/limit NAME NUMBER`", parse_mode='Markdown')
+        await update.message.reply_text("*Usage:* `/limit NAME NUMBER`", parse_mode='Markdown')
         return
     
     name = context.args[0].lower()
@@ -374,7 +368,7 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         limit = int(context.args[1])
         CHANNELS[name]['daily_limit'] = limit
         save_data()
-        await update.message.reply_text(f"**Limit set for `{name}`:** {limit}/day", parse_mode='Markdown')
+        await update.message.reply_text(f"*Limit set for `{name}`:* {limit}/day", parse_mode='Markdown')
     except ValueError:
         await update.message.reply_text("Invalid number")
 
@@ -419,7 +413,7 @@ async def go_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     channel_tasks[name] = asyncio.create_task(forward_loop(name))
                 started.append(name)
         save_data()
-        await update.message.reply_text(f"**Started:** {', '.join(started)}", parse_mode='Markdown')
+        await update.message.reply_text(f"*Started:* {', '.join(started)}", parse_mode='Markdown')
         logger.info(f"Started all: {started}")
 
 
@@ -452,7 +446,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_tasks.clear()
         save_data()
         
-        await update.message.reply_text("**All stopped**", parse_mode='Markdown')
+        await update.message.reply_text("*All stopped*", parse_mode='Markdown')
         logger.info("Stopped all")
 
 
@@ -464,7 +458,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No channels. Use `/quicksetup`", parse_mode='Markdown')
         return
     
-    text = "**Your Channels:**\n\n"
+    text = "*Your Channels:*\n\n"
     for name, config in CHANNELS.items():
         status = "ON" if config.get('enabled') else "OFF"
         interval = config.get('interval', DEFAULT_INTERVAL)
@@ -472,7 +466,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = config.get('daily_count', 0)
         limit = config.get('daily_limit', DEFAULT_LIMIT)
         
-        text += f"**{name}** [{status}]\n"
+        text += f"*{name}* [{status}]\n"
         text += f"  {interval}+/-{var}min | {count}/{limit} today\n\n"
     
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -494,7 +488,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = CHANNELS[name]
     status = "ON" if config.get('enabled') else "OFF"
     
-    text = f"**Channel: {name}** [{status}]\n\n"
+    text = f"*Channel: {name}* [{status}]\n\n"
     text += f"Source: `{config.get('source_id')}`\n"
     text += f"Dest: `{config.get('dest_id')}`\n"
     text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
@@ -515,7 +509,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No channels", parse_mode='Markdown')
         return
     
-    text = f"**Stats - {datetime.now().strftime('%Y-%m-%d')}**\n\n"
+    text = f"*Stats - {datetime.now().strftime('%Y-%m-%d')}*\n\n"
     total = 0
     
     for name, config in CHANNELS.items():
@@ -525,7 +519,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{name} [{status}]: {count}/{limit}\n"
         total += count
     
-    text += f"\n**Total:** {total}"
+    text += f"\n*Total:* {total}"
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
@@ -534,7 +528,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if not context.args:
-        await update.message.reply_text("**Usage:** `/remove NAME`", parse_mode='Markdown')
+        await update.message.reply_text("*Usage:* `/remove NAME`", parse_mode='Markdown')
         return
     
     name = context.args[0].lower()
@@ -663,29 +657,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-```
-
----
-
-## Command Reference
-
-| Command | Usage |
-|---------|-------|
-| `/quicksetup` | `/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT` |
-| `/interval` | `/interval NAME 20 10` |
-| `/content` | `/content NAME photos,videos` |
-| `/caption` | `/caption NAME Your text` |
-| `/limit` | `/limit NAME 80` |
-| `/go` | Start all OR `/go NAME` |
-| `/stop` | Stop all OR `/stop NAME` |
-| `/list` | Show all channels |
-| `/info` | `/info NAME` |
-| `/stats` | Daily counts |
-| `/remove` | `/remove NAME` |
-
----
-
-## Example
-```
-/quicksetup movies -1001234567890 -1009876543210 15 5 photos,videos
-/go movies
