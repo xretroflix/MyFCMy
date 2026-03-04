@@ -1,0 +1,4 @@
+cat > ~/TelethonForwarder/requirements.txt << 'EOF'
+telethon==1.42.0
+python-telegram-bot==20.7
+EOF

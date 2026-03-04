@@ -1,0 +1,3 @@
+cat > ~/TelethonForwarder/Procfile << 'EOF'
+worker: python bot.py
+EOF

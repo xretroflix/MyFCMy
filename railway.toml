@@ -1,0 +1,7 @@
+cat > ~/TelethonForwarder/railway.toml << 'EOF'
+[build]
+builder = "nixpacks"
+
+[deploy]
+restartPolicyType = "always"
+EOF
