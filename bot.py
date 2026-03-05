@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MyFC Forwarder v4.2 - Clean Logs Edition
-No forward header, suppressed Telethon logs
+MyFC Forwarder v4.3 - Clean Media Edition
+No forward header, no original caption, clean logs
 """
 
 import asyncio
@@ -14,10 +14,9 @@ from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.sessions import StringSession
 
-# Suppress Telethon internal logs (channel updates, etc.)
+# Suppress Telethon internal logs
 logging.getLogger('telethon').setLevel(logging.ERROR)
 
-# Our logger only
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
@@ -140,12 +139,20 @@ def should_forward(message, name):
     return content_type in allowed if content_type else False
 
 
-async def send_as_new(dest, msg, caption=None):
-    """Send message as NEW (no forward header)"""
+async def send_as_new(dest, msg, custom_caption=None):
+    """
+    Send message as NEW:
+    - No forward header
+    - No original caption (removed)
+    - Only custom caption if set
+    """
     if msg.media:
-        await client.send_file(dest, msg.media, caption=caption or msg.text or None)
+        # Send media WITHOUT original caption
+        # Only use custom caption if provided
+        await client.send_file(dest, msg.media, caption=custom_caption or "")
     elif msg.text:
-        await client.send_message(dest, caption or msg.text)
+        # For text/links - send custom caption or original text
+        await client.send_message(dest, custom_caption or msg.text)
 
 
 @client.on(events.NewMessage(pattern='/start'))
@@ -153,7 +160,7 @@ async def start_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     await event.respond(
-        "**MyFC Forwarder v4.2**\n\n"
+        "**MyFC Forwarder v4.3**\n\n"
         "**SETUP:**\n"
         "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
         "Example:\n"
@@ -217,7 +224,8 @@ async def quicksetup_handler(event):
             f"Source: `{source}`\n"
             f"Dest: `{dest}`\n"
             f"Interval: {interval}+/-{variation} min\n"
-            f"Content: {', '.join(content_types)}\n\n"
+            f"Content: {', '.join(content_types)}\n"
+            f"Caption: None (clean media)\n\n"
             f"**Test:** `/test {name}`\n"
             f"**Start:** `/go {name}`"
         )
@@ -247,9 +255,9 @@ async def test_handler(event):
         for msg in messages:
             content_type = get_content_type(msg)
             if content_type and content_type in config.get('content_types', []):
-                caption = config.get('caption')
-                await send_as_new(dest, msg, caption)
-                await event.respond(f"**SUCCESS!** Sent 1 {content_type}")
+                custom_caption = config.get('caption')
+                await send_as_new(dest, msg, custom_caption)
+                await event.respond(f"**SUCCESS!** Sent 1 {content_type} (no original caption)")
                 logger.info(f"[TEST] {name}: OK")
                 return
         await event.respond(f"No matching content found")
@@ -351,7 +359,7 @@ async def info_handler(event):
     text += f"Dest: `{config.get('dest_id')}`\n"
     text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
     text += f"Content: {', '.join(config.get('content_types', []))}\n"
-    text += f"Caption: {config.get('caption') or 'None'}\n"
+    text += f"Caption: {config.get('caption') or 'None (clean)'}\n"
     text += f"Today: {config.get('daily_count', 0)}/{config.get('daily_limit')}"
     await event.respond(text)
 
@@ -438,7 +446,7 @@ async def caption_handler(event):
     caption = parts[2]
     if caption.lower() == 'clear':
         CHANNELS[name]['caption'] = None
-        await event.respond("Caption cleared")
+        await event.respond("Caption cleared (clean media)")
     else:
         CHANNELS[name]['caption'] = caption
         await event.respond(f"**Caption:** {caption}")
@@ -512,8 +520,8 @@ async def forward_loop(name):
                     if not should_forward(msg, name):
                         continue
                     try:
-                        caption = config.get('caption')
-                        await send_as_new(dest, msg, caption)
+                        custom_caption = config.get('caption')
+                        await send_as_new(dest, msg, custom_caption)
                         CHANNELS[name]['forwarded_ids'].append(msg.id)
                         CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-500:]
                         CHANNELS[name]['daily_count'] = config.get('daily_count', 0) + 1
@@ -537,7 +545,7 @@ async def forward_loop(name):
 
 async def main():
     print("=" * 40)
-    print("  MyFC Forwarder v4.2")
+    print("  MyFC Forwarder v4.3")
     print("=" * 40)
     load_data()
     logger.info(f"Admin: {ADMIN_ID}")
