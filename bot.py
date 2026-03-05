@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-MyFC Forwarder v4.3 - Clean Media Edition
+MyFC Forwarder v4.4 - Oldest First Edition
+Forwards from oldest to newest (same order as source)
 No forward header, no original caption, clean logs
 """
 
@@ -140,18 +141,10 @@ def should_forward(message, name):
 
 
 async def send_as_new(dest, msg, custom_caption=None):
-    """
-    Send message as NEW:
-    - No forward header
-    - No original caption (removed)
-    - Only custom caption if set
-    """
+    """Send message as NEW - no forward header, no original caption"""
     if msg.media:
-        # Send media WITHOUT original caption
-        # Only use custom caption if provided
         await client.send_file(dest, msg.media, caption=custom_caption or "")
     elif msg.text:
-        # For text/links - send custom caption or original text
         await client.send_message(dest, custom_caption or msg.text)
 
 
@@ -160,7 +153,7 @@ async def start_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     await event.respond(
-        "**MyFC Forwarder v4.3**\n\n"
+        "**MyFC Forwarder v4.4**\n\n"
         "**SETUP:**\n"
         "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
         "Example:\n"
@@ -174,7 +167,8 @@ async def start_handler(event):
         "**INFO:**\n"
         "`/list` `/info NAME` `/stats`\n\n"
         "**SETTINGS:**\n"
-        "`/interval` `/content` `/caption` `/limit` `/remove`"
+        "`/interval` `/content` `/caption` `/limit` `/remove`\n\n"
+        "**Note:** Forwards oldest first (same order as source)"
     )
 
 
@@ -225,7 +219,7 @@ async def quicksetup_handler(event):
             f"Dest: `{dest}`\n"
             f"Interval: {interval}+/-{variation} min\n"
             f"Content: {', '.join(content_types)}\n"
-            f"Caption: None (clean media)\n\n"
+            f"Order: Oldest first\n\n"
             f"**Test:** `/test {name}`\n"
             f"**Start:** `/go {name}`"
         )
@@ -249,15 +243,22 @@ async def test_handler(event):
     config = CHANNELS[name]
     source = config.get('source_id')
     dest = config.get('dest_id')
-    await event.respond(f"Testing `{name}`...")
+    await event.respond(f"Testing `{name}` (oldest first)...")
     try:
+        # Get messages and reverse to oldest first
         messages = await client.get_messages(source, limit=10)
+        messages = list(reversed(messages))  # Oldest first
+        
+        forwarded = set(config.get('forwarded_ids', []))
+        
         for msg in messages:
+            if msg.id in forwarded:
+                continue
             content_type = get_content_type(msg)
             if content_type and content_type in config.get('content_types', []):
                 custom_caption = config.get('caption')
                 await send_as_new(dest, msg, custom_caption)
-                await event.respond(f"**SUCCESS!** Sent 1 {content_type} (no original caption)")
+                await event.respond(f"**SUCCESS!** Sent oldest {content_type}")
                 logger.info(f"[TEST] {name}: OK")
                 return
         await event.respond(f"No matching content found")
@@ -283,7 +284,7 @@ async def go_handler(event):
         save_data()
         if name not in channel_tasks or channel_tasks[name].done():
             channel_tasks[name] = asyncio.create_task(forward_loop(name))
-        await event.respond(f"Started `{name}`")
+        await event.respond(f"Started `{name}` (oldest first)")
         logger.info(f"[>] Started: {name}")
     else:
         started = []
@@ -360,6 +361,7 @@ async def info_handler(event):
     text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
     text += f"Content: {', '.join(config.get('content_types', []))}\n"
     text += f"Caption: {config.get('caption') or 'None (clean)'}\n"
+    text += f"Order: Oldest first\n"
     text += f"Today: {config.get('daily_count', 0)}/{config.get('daily_limit')}"
     await event.respond(text)
 
@@ -496,7 +498,7 @@ async def remove_handler(event):
 
 
 async def forward_loop(name):
-    logger.info(f"[{name}] Loop started")
+    logger.info(f"[{name}] Loop started (oldest first)")
     while CHANNELS.get(name, {}).get('enabled', False):
         try:
             reset_daily_counts()
@@ -512,8 +514,12 @@ async def forward_loop(name):
             if not source or not dest:
                 break
             try:
-                messages = await client.get_messages(source, limit=50)
+                # Get messages and reverse to oldest first
+                messages = await client.get_messages(source, limit=100)
+                messages = list(reversed(messages))  # Oldest first
+                
                 forwarded = set(config.get('forwarded_ids', []))
+                
                 for msg in messages:
                     if msg.id in forwarded:
                         continue
@@ -523,7 +529,7 @@ async def forward_loop(name):
                         custom_caption = config.get('caption')
                         await send_as_new(dest, msg, custom_caption)
                         CHANNELS[name]['forwarded_ids'].append(msg.id)
-                        CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-500:]
+                        CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-1000:]
                         CHANNELS[name]['daily_count'] = config.get('daily_count', 0) + 1
                         save_data()
                         logger.info(f"[{name}] Sent #{CHANNELS[name]['daily_count']}")
@@ -545,7 +551,8 @@ async def forward_loop(name):
 
 async def main():
     print("=" * 40)
-    print("  MyFC Forwarder v4.3")
+    print("  MyFC Forwarder v4.4")
+    print("  Oldest First Edition")
     print("=" * 40)
     load_data()
     logger.info(f"Admin: {ADMIN_ID}")
