@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""
-MyFC Forwarder v3.1 - Simple Edition
-Quick setup with one command
-Auto-fixes channel IDs (with or without -100)
-"""
-
 import asyncio
 import random
 import json
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.sessions import StringSession
@@ -38,7 +32,6 @@ if not ADMIN_ID:
 DEFAULT_INTERVAL = 30
 DEFAULT_VARIATION = 10
 DEFAULT_LIMIT = 100
-
 CHANNELS = {}
 
 DATA_DIR = "/app/data"
@@ -49,7 +42,6 @@ if not os.path.exists(DATA_DIR):
         DATA_DIR = "."
 
 DATA_FILE = os.path.join(DATA_DIR, "forwarder_data.json")
-
 last_reset_date = None
 is_running = False
 telethon_client = None
@@ -57,11 +49,524 @@ channel_tasks = {}
 
 
 def fix_channel_id(channel_id):
-    """
-    Fix channel ID format - handles both with and without -100 prefix
-    Input: 3773414989 or -1003773414989 or -100 3773414989
-    Output: -1003773414989
-    """
+    id_str = str(channel_id).replace(" ", "")
+    if id_str.startswith("-100"):
+        return int(id_str)
+    if id_str.startswith("-"):
+        id_str = id_str[1:]
+    if len(id_str) >= 10:
+        return int(f"-100{id_str}")
+    return int(f"-{id_str}") if not id_str.startswith("-") else int(id_str)
+
+
+def save_data():
+    try:
+        data = {'channels': CHANNELS, 'last_reset_date': last_reset_date.isoformat() if last_reset_date else None}
+        with open(DATA_FILE, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+        logger.info("Data saved")
+    except Exception as e:
+        logger.error(f"Save error: {e}")
+
+
+def load_data():
+    global CHANNELS, last_reset_date
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r') as f:
+                data = json.load(f)
+            CHANNELS = data.get('channels', {})
+            if data.get('last_reset_date'):
+                last_reset_date = datetime.fromisoformat(data['last_reset_date'])
+            logger.info(f"Loaded {len(CHANNELS)} channels")
+    except Exception as e:
+        logger.warning(f"Load error: {e}")
+
+
+def reset_daily_counts():
+    global last_reset_date
+    today = datetime.now().date()
+    if last_reset_date is None or last_reset_date.date() < today:
+        for name in CHANNELS:
+            CHANNELS[name]['daily_count'] = 0
+        last_reset_date = datetime.now()
+        save_data()
+
+
+def get_random_interval(name):
+    config = CHANNELS.get(name, {})
+    base = config.get('interval', DEFAULT_INTERVAL)
+    var = config.get('variation', DEFAULT_VARIATION)
+    variation = random.randint(1, var)
+    if random.choice([True, False]):
+        variation = -variation
+    return max(5, base + variation)
+
+
+def get_content_type(message):
+    if not message:
+        return None
+    if message.photo or isinstance(message.media, MessageMediaPhoto):
+        return 'photos'
+    if isinstance(message.media, MessageMediaDocument):
+        if message.media.document:
+            mime = message.media.document.mime_type or ''
+            if mime.startswith('video/'):
+                return 'videos'
+            elif mime.startswith('audio/'):
+                return 'audio'
+            elif mime.startswith('image/'):
+                return 'photos'
+            else:
+                return 'docs'
+    if message.text or message.message:
+        text = message.text or message.message
+        if 'http://' in text or 'https://' in text:
+            return 'links'
+    if isinstance(message.media, MessageMediaWebPage):
+        return 'links'
+    return None
+
+
+def should_forward(message, name):
+    config = CHANNELS.get(name, {})
+    allowed = config.get('content_types', ['photos', 'videos'])
+    content_type = get_content_type(message)
+    return content_type in allowed if content_type else False
+
+
+async def admin_only(update):
+    if not update.effective_user or update.effective_user.id != ADMIN_ID:
+        return False
+    return True
+
+
+async def start_command(update, context):
+    if not await admin_only(update):
+        return
+    text = (
+        "*MyFC Forwarder v3.1*\n\n"
+        "*QUICK SETUP:*\n"
+        "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
+        "Example:\n"
+        "`/quicksetup movies 3773414989 3255469862 15 5 photos,videos`\n\n"
+        "*Content:* photos, videos, audio, docs, links\n\n"
+        "*SETTINGS:*\n"
+        "`/interval NAME 20 10`\n"
+        "`/content NAME photos,videos`\n"
+        "`/caption NAME text`\n"
+        "`/limit NAME 80`\n\n"
+        "*CONTROL:*\n"
+        "`/go` - Start all\n"
+        "`/go NAME` - Start one\n"
+        "`/stop` - Stop all\n"
+        "`/stop NAME` - Stop one\n"
+        "`/test NAME` - Test forward\n\n"
+        "*INFO:*\n"
+        "`/list` - All channels\n"
+        "`/info NAME` - Details\n"
+        "`/stats` - Daily counts\n"
+        "`/remove NAME` - Delete"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def quicksetup_command(update, context):
+    if not await admin_only(update):
+        return
+    if len(context.args) < 6:
+        await update.message.reply_text(
+            "*Usage:*\n`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
+            "*Example:*\n`/quicksetup movies 3773414989 3255469862 15 5 photos,videos`",
+            parse_mode='Markdown'
+        )
+        return
+    try:
+        name = context.args[0].lower()
+        source = fix_channel_id(context.args[1])
+        dest = fix_channel_id(context.args[2])
+        interval = int(context.args[3])
+        variation = int(context.args[4])
+        content_str = context.args[5].lower()
+        if interval < 5:
+            await update.message.reply_text("Minimum interval is 5 minutes")
+            return
+        valid_types = ['photos', 'videos', 'audio', 'docs', 'links']
+        content_types = [t.strip() for t in content_str.split(',') if t.strip() in valid_types]
+        if not content_types:
+            await update.message.reply_text(f"Invalid content. Use: {', '.join(valid_types)}")
+            return
+        CHANNELS[name] = {
+            'source_id': source,
+            'dest_id': dest,
+            'interval': interval,
+            'variation': variation,
+            'daily_limit': DEFAULT_LIMIT,
+            'content_types': content_types,
+            'caption': None,
+            'enabled': False,
+            'daily_count': 0,
+            'forwarded_ids': [],
+        }
+        save_data()
+        await update.message.reply_text(
+            f"*Channel `{name}` created!*\n\n"
+            f"Source: `{source}`\n"
+            f"Dest: `{dest}`\n"
+            f"Interval: {interval}+/-{variation} min\n"
+            f"Content: {', '.join(content_types)}\n\n"
+            f"*Start:* `/go {name}`\n"
+            f"*Test:* `/test {name}`",
+            parse_mode='Markdown'
+        )
+        logger.info(f"Channel created: {name}")
+    except ValueError as e:
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def test_command(update, context):
+    if not await admin_only(update):
+        return
+    if not context.args:
+        await update.message.reply_text("*Usage:* `/test NAME`", parse_mode='Markdown')
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    config = CHANNELS[name]
+    source = config.get('source_id')
+    dest = config.get('dest_id')
+    await update.message.reply_text(f"Testing `{name}`...", parse_mode='Markdown')
+    try:
+        messages = await telethon_client.get_messages(source, limit=10)
+        await update.message.reply_text(f"Got {len(messages)} messages from source")
+        for msg in messages:
+            if should_forward(msg, name):
+                caption = config.get('caption')
+                if caption and msg.media:
+                    await telethon_client.send_message(dest, caption, file=msg.media)
+                else:
+                    await telethon_client.forward_messages(dest, msg, source)
+                await update.message.reply_text(f"*Test SUCCESS!* Forwarded 1 message to dest", parse_mode='Markdown')
+                return
+        await update.message.reply_text("No matching content found in source")
+    except Exception as e:
+        await update.message.reply_text(f"*Test FAILED:* {e}", parse_mode='Markdown')
+        logger.error(f"Test error: {e}")
+
+
+async def interval_command(update, context):
+    if not await admin_only(update):
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text("*Usage:* `/interval NAME BASE VAR`", parse_mode='Markdown')
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    try:
+        base = int(context.args[1])
+        var = int(context.args[2])
+        if base < 5:
+            await update.message.reply_text("Minimum 5 minutes")
+            return
+        CHANNELS[name]['interval'] = base
+        CHANNELS[name]['variation'] = var
+        save_data()
+        await update.message.reply_text(f"*Interval set:* {base}+/-{var} min", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("Invalid numbers")
+
+
+async def content_command(update, context):
+    if not await admin_only(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("*Usage:* `/content NAME photos,videos`", parse_mode='Markdown')
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    valid = ['photos', 'videos', 'audio', 'docs', 'links']
+    types = [t.strip() for t in context.args[1].lower().split(',') if t.strip() in valid]
+    if not types:
+        await update.message.reply_text(f"Invalid. Use: {', '.join(valid)}")
+        return
+    CHANNELS[name]['content_types'] = types
+    save_data()
+    await update.message.reply_text(f"*Content set:* {', '.join(types)}", parse_mode='Markdown')
+
+
+async def caption_command(update, context):
+    if not await admin_only(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("*Usage:* `/caption NAME text`\n*Clear:* `/caption NAME clear`", parse_mode='Markdown')
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    caption = ' '.join(context.args[1:])
+    if caption.lower() == 'clear':
+        CHANNELS[name]['caption'] = None
+        await update.message.reply_text(f"Caption cleared", parse_mode='Markdown')
+    else:
+        CHANNELS[name]['caption'] = caption
+        await update.message.reply_text(f"*Caption set:* {caption}", parse_mode='Markdown')
+    save_data()
+
+
+async def limit_command(update, context):
+    if not await admin_only(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("*Usage:* `/limit NAME NUMBER`", parse_mode='Markdown')
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    try:
+        limit = int(context.args[1])
+        CHANNELS[name]['daily_limit'] = limit
+        save_data()
+        await update.message.reply_text(f"*Limit set:* {limit}/day", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("Invalid number")
+
+
+async def go_command(update, context):
+    if not await admin_only(update):
+        return
+    global is_running
+    if not CHANNELS:
+        await update.message.reply_text("No channels. Use `/quicksetup`", parse_mode='Markdown')
+        return
+    if context.args:
+        name = context.args[0].lower()
+        if name not in CHANNELS:
+            await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+            return
+        CHANNELS[name]['enabled'] = True
+        is_running = True
+        save_data()
+        if name not in channel_tasks or channel_tasks[name].done():
+            channel_tasks[name] = asyncio.create_task(forward_loop(name))
+        await update.message.reply_text(f"Started `{name}`", parse_mode='Markdown')
+        logger.info(f"Started: {name}")
+    else:
+        is_running = True
+        started = []
+        for name, config in CHANNELS.items():
+            if config.get('source_id') and config.get('dest_id'):
+                CHANNELS[name]['enabled'] = True
+                if name not in channel_tasks or channel_tasks[name].done():
+                    channel_tasks[name] = asyncio.create_task(forward_loop(name))
+                started.append(name)
+        save_data()
+        await update.message.reply_text(f"*Started:* {', '.join(started)}", parse_mode='Markdown')
+
+
+async def stop_command(update, context):
+    if not await admin_only(update):
+        return
+    global is_running
+    if context.args:
+        name = context.args[0].lower()
+        if name not in CHANNELS:
+            await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+            return
+        CHANNELS[name]['enabled'] = False
+        if name in channel_tasks:
+            channel_tasks[name].cancel()
+            del channel_tasks[name]
+        save_data()
+        await update.message.reply_text(f"Stopped `{name}`", parse_mode='Markdown')
+    else:
+        is_running = False
+        for name in CHANNELS:
+            CHANNELS[name]['enabled'] = False
+            if name in channel_tasks:
+                channel_tasks[name].cancel()
+        channel_tasks.clear()
+        save_data()
+        await update.message.reply_text("*All stopped*", parse_mode='Markdown')
+
+
+async def list_command(update, context):
+    if not await admin_only(update):
+        return
+    if not CHANNELS:
+        await update.message.reply_text("No channels. Use `/quicksetup`", parse_mode='Markdown')
+        return
+    text = "*Channels:*\n\n"
+    for name, config in CHANNELS.items():
+        status = "ON" if config.get('enabled') else "OFF"
+        text += f"*{name}* [{status}] - {config.get('daily_count', 0)}/{config.get('daily_limit')}\n"
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def info_command(update, context):
+    if not await admin_only(update):
+        return
+    if not context.args:
+        await list_command(update, context)
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    config = CHANNELS[name]
+    status = "ON" if config.get('enabled') else "OFF"
+    text = f"*{name}* [{status}]\n\n"
+    text += f"Source: `{config.get('source_id')}`\n"
+    text += f"Dest: `{config.get('dest_id')}`\n"
+    text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
+    text += f"Content: {', '.join(config.get('content_types', []))}\n"
+    text += f"Caption: {config.get('caption') or 'None'}\n"
+    text += f"Today: {config.get('daily_count', 0)}/{config.get('daily_limit')}"
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def stats_command(update, context):
+    if not await admin_only(update):
+        return
+    reset_daily_counts()
+    if not CHANNELS:
+        await update.message.reply_text("No channels", parse_mode='Markdown')
+        return
+    text = f"*Stats - {datetime.now().strftime('%Y-%m-%d')}*\n\n"
+    total = 0
+    for name, config in CHANNELS.items():
+        count = config.get('daily_count', 0)
+        status = "ON" if config.get('enabled') else "OFF"
+        text += f"{name} [{status}]: {count}/{config.get('daily_limit')}\n"
+        total += count
+    text += f"\n*Total:* {total}"
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def remove_command(update, context):
+    if not await admin_only(update):
+        return
+    if not context.args:
+        await update.message.reply_text("*Usage:* `/remove NAME`", parse_mode='Markdown')
+        return
+    name = context.args[0].lower()
+    if name not in CHANNELS:
+        await update.message.reply_text(f"Channel `{name}` not found", parse_mode='Markdown')
+        return
+    if name in channel_tasks:
+        channel_tasks[name].cancel()
+        del channel_tasks[name]
+    del CHANNELS[name]
+    save_data()
+    await update.message.reply_text(f"Removed `{name}`", parse_mode='Markdown')
+
+
+async def forward_loop(name):
+    global telethon_client
+    logger.info(f"Loop started: {name}")
+    while CHANNELS.get(name, {}).get('enabled', False):
+        try:
+            reset_daily_counts()
+            config = CHANNELS.get(name)
+            if not config:
+                break
+            if config.get('daily_count', 0) >= config.get('daily_limit', DEFAULT_LIMIT):
+                logger.info(f"{name} limit reached")
+                await asyncio.sleep(3600)
+                continue
+            source = config.get('source_id')
+            dest = config.get('dest_id')
+            if not source or not dest:
+                break
+            try:
+                messages = await telethon_client.get_messages(source, limit=50)
+                forwarded = set(config.get('forwarded_ids', []))
+                for msg in messages:
+                    if msg.id in forwarded:
+                        continue
+                    if not should_forward(msg, name):
+                        continue
+                    try:
+                        caption = config.get('caption')
+                        if caption and msg.media:
+                            await telethon_client.send_message(dest, caption, file=msg.media)
+                        else:
+                            await telethon_client.forward_messages(dest, msg, source)
+                        CHANNELS[name]['forwarded_ids'].append(msg.id)
+                        CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-500:]
+                        CHANNELS[name]['daily_count'] = config.get('daily_count', 0) + 1
+                        save_data()
+                        logger.info(f"Forwarded to {name} (#{CHANNELS[name]['daily_count']})")
+                        break
+                    except Exception as e:
+                        logger.error(f"Forward error: {e}")
+                        continue
+            except Exception as e:
+                logger.error(f"Get messages error: {e}")
+            interval = get_random_interval(name)
+            logger.info(f"{name} next in {interval}m")
+            await asyncio.sleep(interval * 60)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Loop error: {e}")
+            await asyncio.sleep(60)
+    logger.info(f"Loop ended: {name}")
+
+
+async def start_telethon():
+    global telethon_client
+    telethon_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    await telethon_client.start()
+    me = await telethon_client.get_me()
+    logger.info(f"Telethon: {me.first_name}")
+    logger.info("Loading dialogs...")
+    try:
+        dialogs = await telethon_client.get_dialogs()
+        logger.info(f"Loaded {len(dialogs)} dialogs")
+    except Exception as e:
+        logger.warning(f"Dialog load error: {e}")
+    return telethon_client
+
+
+def main():
+    print("=" * 50)
+    print("  MyFC Forwarder v3.1")
+    print("=" * 50)
+    load_data()
+    logger.info(f"Admin: {ADMIN_ID}")
+    logger.info(f"Channels: {len(CHANNELS)}")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("quicksetup", quicksetup_command))
+    app.add_handler(CommandHandler("test", test_command))
+    app.add_handler(CommandHandler("interval", interval_command))
+    app.add_handler(CommandHandler("content", content_command))
+    app.add_handler(CommandHandler("caption", caption_command))
+    app.add_handler(CommandHandler("limit", limit_command))
+    app.add_handler(CommandHandler("go", go_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("list", list_command))
+    app.add_handler(CommandHandler("info", info_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("remove", remove_command))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_telethon())
+    logger.info("Bot running!")
+    print("=" * 50)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == '__main__':
+    main()    """
     # Convert to string and remove spaces
     id_str = str(channel_id).replace(" ", "")
     
