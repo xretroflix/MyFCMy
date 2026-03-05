@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MyFC Forwarder v4.0 - Pure Telethon Edition
-No library conflicts - stable and fast
+MyFC Forwarder v4.2 - Clean Logs Edition
+No forward header, suppressed Telethon logs
 """
 
 import asyncio
@@ -14,8 +14,16 @@ from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.sessions import StringSession
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Suppress Telethon internal logs (channel updates, etc.)
+logging.getLogger('telethon').setLevel(logging.ERROR)
+
+# Our logger only
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger('MyFC')
 
 API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
@@ -132,32 +140,34 @@ def should_forward(message, name):
     return content_type in allowed if content_type else False
 
 
+async def send_as_new(dest, msg, caption=None):
+    """Send message as NEW (no forward header)"""
+    if msg.media:
+        await client.send_file(dest, msg.media, caption=caption or msg.text or None)
+    elif msg.text:
+        await client.send_message(dest, caption or msg.text)
+
+
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     await event.respond(
-        "**MyFC Forwarder v4.0**\n\n"
+        "**MyFC Forwarder v4.2**\n\n"
         "**SETUP:**\n"
         "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
         "Example:\n"
         "`/quicksetup movies 3773414989 3255469862 15 5 photos,videos`\n\n"
         "**CONTROL:**\n"
-        "`/test NAME` - Test forward now\n"
-        "`/go NAME` - Start channel\n"
+        "`/test NAME` - Test now\n"
+        "`/go NAME` - Start one\n"
         "`/go` - Start all\n"
-        "`/stop NAME` - Stop channel\n"
+        "`/stop NAME` - Stop one\n"
         "`/stop` - Stop all\n\n"
         "**INFO:**\n"
-        "`/list` - All channels\n"
-        "`/info NAME` - Details\n"
-        "`/stats` - Daily counts\n\n"
+        "`/list` `/info NAME` `/stats`\n\n"
         "**SETTINGS:**\n"
-        "`/interval NAME 20 10`\n"
-        "`/content NAME photos,videos`\n"
-        "`/caption NAME text`\n"
-        "`/limit NAME 80`\n"
-        "`/remove NAME` - Delete"
+        "`/interval` `/content` `/caption` `/limit` `/remove`"
     )
 
 
@@ -211,7 +221,7 @@ async def quicksetup_handler(event):
             f"**Test:** `/test {name}`\n"
             f"**Start:** `/go {name}`"
         )
-        logger.info(f"Created: {name}")
+        logger.info(f"[+] Created: {name}")
     except Exception as e:
         await event.respond(f"Error: {e}")
 
@@ -233,25 +243,18 @@ async def test_handler(event):
     dest = config.get('dest_id')
     await event.respond(f"Testing `{name}`...")
     try:
-        logger.info(f"Test: Getting messages from {source}")
         messages = await client.get_messages(source, limit=10)
-        logger.info(f"Test: Got {len(messages)} messages")
-        await event.respond(f"Found {len(messages)} messages in source")
         for msg in messages:
             content_type = get_content_type(msg)
             if content_type and content_type in config.get('content_types', []):
-                logger.info(f"Test: Forwarding {content_type}")
                 caption = config.get('caption')
-                if caption and msg.media:
-                    await client.send_message(dest, caption, file=msg.media)
-                else:
-                    await client.forward_messages(dest, msg, source)
-                await event.respond(f"**SUCCESS!** Forwarded 1 {content_type}")
-                logger.info(f"Test: Success!")
+                await send_as_new(dest, msg, caption)
+                await event.respond(f"**SUCCESS!** Sent 1 {content_type}")
+                logger.info(f"[TEST] {name}: OK")
                 return
-        await event.respond(f"No matching content found. Source has messages but none match: {config.get('content_types')}")
+        await event.respond(f"No matching content found")
     except Exception as e:
-        logger.error(f"Test error: {e}")
+        logger.error(f"[TEST] {name}: {e}")
         await event.respond(f"**FAILED:** {e}")
 
 
@@ -273,7 +276,7 @@ async def go_handler(event):
         if name not in channel_tasks or channel_tasks[name].done():
             channel_tasks[name] = asyncio.create_task(forward_loop(name))
         await event.respond(f"Started `{name}`")
-        logger.info(f"Started: {name}")
+        logger.info(f"[>] Started: {name}")
     else:
         started = []
         for name, config in CHANNELS.items():
@@ -284,6 +287,7 @@ async def go_handler(event):
                 started.append(name)
         save_data()
         await event.respond(f"**Started:** {', '.join(started)}")
+        logger.info(f"[>] Started all: {', '.join(started)}")
 
 
 @client.on(events.NewMessage(pattern='/stop'))
@@ -302,6 +306,7 @@ async def stop_handler(event):
             del channel_tasks[name]
         save_data()
         await event.respond(f"Stopped `{name}`")
+        logger.info(f"[X] Stopped: {name}")
     else:
         for name in CHANNELS:
             CHANNELS[name]['enabled'] = False
@@ -310,6 +315,7 @@ async def stop_handler(event):
         channel_tasks.clear()
         save_data()
         await event.respond("**All stopped**")
+        logger.info("[X] Stopped all")
 
 
 @client.on(events.NewMessage(pattern='/list'))
@@ -478,10 +484,11 @@ async def remove_handler(event):
     del CHANNELS[name]
     save_data()
     await event.respond(f"Removed `{name}`")
+    logger.info(f"[-] Removed: {name}")
 
 
 async def forward_loop(name):
-    logger.info(f"Loop started: {name}")
+    logger.info(f"[{name}] Loop started")
     while CHANNELS.get(name, {}).get('enabled', False):
         try:
             reset_daily_counts()
@@ -489,7 +496,7 @@ async def forward_loop(name):
             if not config:
                 break
             if config.get('daily_count', 0) >= config.get('daily_limit', DEFAULT_LIMIT):
-                logger.info(f"{name} limit reached")
+                logger.info(f"[{name}] Limit reached")
                 await asyncio.sleep(3600)
                 continue
             source = config.get('source_id')
@@ -506,49 +513,40 @@ async def forward_loop(name):
                         continue
                     try:
                         caption = config.get('caption')
-                        if caption and msg.media:
-                            await client.send_message(dest, caption, file=msg.media)
-                        else:
-                            await client.forward_messages(dest, msg, source)
+                        await send_as_new(dest, msg, caption)
                         CHANNELS[name]['forwarded_ids'].append(msg.id)
                         CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-500:]
                         CHANNELS[name]['daily_count'] = config.get('daily_count', 0) + 1
                         save_data()
-                        logger.info(f"Forwarded to {name} (#{CHANNELS[name]['daily_count']})")
+                        logger.info(f"[{name}] Sent #{CHANNELS[name]['daily_count']}")
                         break
                     except Exception as e:
-                        logger.error(f"Forward error: {e}")
+                        logger.error(f"[{name}] Send error: {e}")
             except Exception as e:
-                logger.error(f"Get messages error: {e}")
+                logger.error(f"[{name}] Read error: {e}")
             interval = get_random_interval(name)
-            logger.info(f"{name} next in {interval}m")
+            logger.info(f"[{name}] Next in {interval}m")
             await asyncio.sleep(interval * 60)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"Loop error: {e}")
+            logger.error(f"[{name}] Error: {e}")
             await asyncio.sleep(60)
-    logger.info(f"Loop ended: {name}")
+    logger.info(f"[{name}] Loop ended")
 
 
 async def main():
-    print("=" * 50)
-    print("  MyFC Forwarder v4.0 - Pure Telethon")
-    print("=" * 50)
+    print("=" * 40)
+    print("  MyFC Forwarder v4.2")
+    print("=" * 40)
     load_data()
     logger.info(f"Admin: {ADMIN_ID}")
     logger.info(f"Channels: {len(CHANNELS)}")
     await client.start()
     me = await client.get_me()
-    logger.info(f"Logged in: {me.first_name} (@{me.username})")
-    logger.info("Loading dialogs...")
-    try:
-        dialogs = await client.get_dialogs()
-        logger.info(f"Loaded {len(dialogs)} dialogs")
-    except Exception as e:
-        logger.warning(f"Dialog error: {e}")
-    logger.info("Bot running! Send /start")
-    print("=" * 50)
+    logger.info(f"Logged in: {me.first_name}")
+    logger.info("Ready! Send /start")
+    print("=" * 40)
     await client.run_until_disconnected()
 
 
