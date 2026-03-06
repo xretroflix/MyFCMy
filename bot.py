@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-MyFC Forwarder v4.7 - Large Scale Edition
-- Scan source before starting (handles 2 lakh+ content)
-- Accurate tracking: Source count = Forward count
-- Handles restricted channels (download + re-upload)
+MyFC Forwarder v4.8 - Random Emoji Edition
+- Random emoji in captions
+- Scan source before starting
+- Handles 2 lakh+ content
 - No content missed
 """
 
@@ -50,7 +50,6 @@ CHANNELS = {}
 
 last_reset_date = None
 channel_tasks = {}
-scan_tasks = {}
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
@@ -78,7 +77,6 @@ def fix_channel_id(channel_id):
 def save_data():
     global CHANNELS, last_reset_date
     try:
-        # Don't save all_source_ids to Supabase (too large)
         save_channels = {}
         for name, config in CHANNELS.items():
             save_config = {k: v for k, v in config.items() if k != 'all_source_ids'}
@@ -168,16 +166,33 @@ def should_forward(message, content_types):
     return content_type in content_types if content_type else False
 
 
-async def send_as_new(dest, msg, custom_caption=None):
-    """
-    Send message as NEW - handles restricted channels
-    Downloads media and re-uploads (bypasses forward restrictions)
-    """
+def get_caption_with_emoji(config):
+    """Get caption with random emoji"""
+    caption = config.get('caption', '')
+    emojis = config.get('emojis', [])
+    
+    if not caption:
+        return ""
+    
+    if emojis:
+        random_emoji = random.choice(emojis)
+        # Replace {emoji} placeholder or add at start
+        if '{emoji}' in caption:
+            return caption.replace('{emoji}', random_emoji)
+        else:
+            return f"{random_emoji} {caption}"
+    
+    return caption
+
+
+async def send_as_new(dest, msg, config):
+    """Send message with random emoji caption"""
+    caption = get_caption_with_emoji(config)
+    
     if msg.media:
-        # Download and re-upload (works even if forwarding is restricted)
-        await client.send_file(dest, msg.media, caption=custom_caption or "")
+        await client.send_file(dest, msg.media, caption=caption or "")
     elif msg.text:
-        await client.send_message(dest, custom_caption or msg.text)
+        await client.send_message(dest, caption or msg.text)
 
 
 async def notify_admin(message):
@@ -188,11 +203,6 @@ async def notify_admin(message):
 
 
 async def scan_source_channel(source, content_types, progress_callback=None):
-    """
-    Scan ALL content from source channel
-    Returns list of message IDs (oldest first)
-    Handles 2 lakh+ messages
-    """
     all_ids = []
     offset_id = 0
     batch_count = 0
@@ -210,23 +220,20 @@ async def scan_source_channel(source, content_types, progress_callback=None):
             offset_id = messages[-1].id
             batch_count += 1
             
-            # Progress update every 50 batches (5000 messages)
             if progress_callback and batch_count % 50 == 0:
                 await progress_callback(len(all_ids), batch_count * 100)
             
             if len(messages) < 100:
                 break
             
-            # Rate limit: 1 second delay every 10 batches
             if batch_count % 10 == 0:
                 await asyncio.sleep(1)
                 
         except Exception as e:
-            logger.error(f"Scan error at batch {batch_count}: {e}")
+            logger.error(f"Scan error: {e}")
             await asyncio.sleep(5)
             continue
     
-    # Return oldest first
     all_ids.reverse()
     return all_ids
 
@@ -236,24 +243,21 @@ async def start_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     await event.respond(
-        "**MyFC Forwarder v4.7** (Large Scale)\n\n"
+        "**MyFC Forwarder v4.8** (Random Emoji)\n\n"
         "**SETUP:**\n"
-        "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
+        "`/quicksetup NAME SOURCE DEST INT VAR CONTENT`\n\n"
+        "**CAPTION & EMOJI:**\n"
+        "`/caption NAME text` - Set caption\n"
+        "`/emojis NAME 🚗,⚠️,🚦` - Set emoji list\n\n"
         "**BEFORE STARTING:**\n"
-        "`/scan NAME` - Count all source content\n\n"
+        "`/scan NAME` - Count source content\n\n"
         "**CONTROL:**\n"
-        "`/test NAME` - Test one forward\n"
-        "`/go NAME` - Start forwarding\n"
-        "`/stop NAME` - Stop forwarding\n\n"
+        "`/test` `/go` `/stop`\n\n"
         "**INFO:**\n"
-        "`/list` - All channels\n"
-        "`/info NAME` - Channel details\n"
-        "`/stats` - Daily + Total counts\n"
-        "`/progress NAME` - Live progress\n\n"
+        "`/list` `/info` `/stats` `/progress`\n\n"
         "**SETTINGS:**\n"
-        "`/interval` `/content` `/caption` `/limit`\n"
-        "`/remove NAME` `/reset NAME`\n\n"
-        "Handles 2 lakh+ content!"
+        "`/interval` `/content` `/limit`\n"
+        "`/remove` `/reset`"
     )
 
 
@@ -267,8 +271,7 @@ async def quicksetup_handler(event):
             "**Usage:**\n"
             "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
             "**Example:**\n"
-            "`/quicksetup movies 3773414989 3255469862 15 5 photos,videos`\n\n"
-            "**Content:** photos, videos, audio, docs, links"
+            "`/quicksetup ch1 3773414989 3255469862 30 8 photos,videos`"
         )
         return
     try:
@@ -298,10 +301,11 @@ async def quicksetup_handler(event):
             'daily_limit': DEFAULT_LIMIT,
             'content_types': content_types,
             'caption': None,
+            'emojis': [],
             'enabled': False,
             'daily_count': 0,
             'total_forwarded': 0,
-            'source_total': 0,  # Will be set by /scan
+            'source_total': 0,
             'forwarded_ids': [],
             'completed': False,
             'scanned': False,
@@ -314,12 +318,148 @@ async def quicksetup_handler(event):
             f"Dest: `{dest}`\n"
             f"Interval: {interval}+/-{variation} min\n"
             f"Content: {', '.join(content_types)}\n\n"
-            f"**Next step:** `/scan {name}`\n"
-            f"(Counts all content before starting)"
+            f"**Next steps:**\n"
+            f"1. `/caption {name} Your text`\n"
+            f"2. `/emojis {name} 🚗,⚠️,🚦`\n"
+            f"3. `/scan {name}`\n"
+            f"4. `/go {name}`"
         )
         logger.info(f"[+] Created: {name}")
     except Exception as e:
         await event.respond(f"Error: {e}")
+
+
+@client.on(events.NewMessage(pattern='/emojis'))
+async def emojis_handler(event):
+    if event.sender_id != ADMIN_ID:
+        return
+    parts = event.text.split(maxsplit=2)
+    
+    if len(parts) < 2:
+        await event.respond(
+            "**Usage:**\n"
+            "`/emojis NAME emoji1,emoji2,emoji3`\n\n"
+            "**Example:**\n"
+            "`/emojis ch1 🚗,⚠️,🚦,🛣️,🚨`\n\n"
+            "**Clear emojis:**\n"
+            "`/emojis NAME clear`\n\n"
+            "**Popular emoji sets:**\n\n"
+            "🚗 Traffic:\n"
+            "`🚗,🚙,🚕,🚌,🏎️,🚓,🚑,🚒,🛣️,🚦,⚠️,🚨`\n\n"
+            "⚠️ Warning:\n"
+            "`⚠️,🚨,❗,❌,🔴,⛔,🚫,💀,☠️,🆘`\n\n"
+            "📢 General:\n"
+            "`📢,📣,🔔,💡,✨,🌟,⭐,🔥,💥,👀`\n\n"
+            "🎬 Media:\n"
+            "`🎬,🎥,📹,📸,🖼️,🎞️,📺,📽️,🎦,🎭`"
+        )
+        return
+    
+    name = parts[1].lower()
+    if name not in CHANNELS:
+        await event.respond(f"Channel `{name}` not found")
+        return
+    
+    if len(parts) < 3:
+        # Show current emojis
+        emojis = CHANNELS[name].get('emojis', [])
+        if emojis:
+            await event.respond(f"**Current emojis for `{name}`:**\n{', '.join(emojis)}")
+        else:
+            await event.respond(f"No emojis set for `{name}`")
+        return
+    
+    emoji_str = parts[2]
+    
+    if emoji_str.lower() == 'clear':
+        CHANNELS[name]['emojis'] = []
+        save_data()
+        await event.respond(f"✅ Emojis cleared for `{name}`")
+        return
+    
+    # Parse emojis (comma or space separated)
+    emojis = [e.strip() for e in emoji_str.replace(' ', ',').split(',') if e.strip()]
+    
+    if not emojis:
+        await event.respond("No valid emojis found")
+        return
+    
+    CHANNELS[name]['emojis'] = emojis
+    save_data()
+    
+    await event.respond(
+        f"✅ **Emojis set for `{name}`**\n\n"
+        f"Emojis: {', '.join(emojis)}\n"
+        f"Total: {len(emojis)}\n\n"
+        f"Each post will have a random emoji!"
+    )
+
+
+@client.on(events.NewMessage(pattern='/caption'))
+async def caption_handler(event):
+    if event.sender_id != ADMIN_ID:
+        return
+    parts = event.text.split(maxsplit=2)
+    
+    if len(parts) < 2:
+        await event.respond(
+            "**Usage:**\n"
+            "`/caption NAME your text here`\n\n"
+            "**With emoji placeholder:**\n"
+            "`/caption NAME {emoji} Drive Safe | @Channel`\n\n"
+            "**Without placeholder:**\n"
+            "`/caption NAME Drive Safe | @Channel`\n"
+            "(emoji added at start automatically)\n\n"
+            "**Clear:**\n"
+            "`/caption NAME clear`"
+        )
+        return
+    
+    name = parts[1].lower()
+    if name not in CHANNELS:
+        await event.respond(f"Channel `{name}` not found")
+        return
+    
+    if len(parts) < 3:
+        caption = CHANNELS[name].get('caption')
+        emojis = CHANNELS[name].get('emojis', [])
+        if caption:
+            await event.respond(
+                f"**Caption for `{name}`:**\n{caption}\n\n"
+                f"**Emojis:** {', '.join(emojis) if emojis else 'None'}"
+            )
+        else:
+            await event.respond(f"No caption set for `{name}`")
+        return
+    
+    caption = parts[2]
+    
+    if caption.lower() == 'clear':
+        CHANNELS[name]['caption'] = None
+        save_data()
+        await event.respond(f"✅ Caption cleared for `{name}`")
+        return
+    
+    CHANNELS[name]['caption'] = caption
+    save_data()
+    
+    emojis = CHANNELS[name].get('emojis', [])
+    example = ""
+    if emojis:
+        sample_emoji = random.choice(emojis)
+        if '{emoji}' in caption:
+            example = caption.replace('{emoji}', sample_emoji)
+        else:
+            example = f"{sample_emoji} {caption}"
+    else:
+        example = caption
+    
+    await event.respond(
+        f"✅ **Caption set for `{name}`**\n\n"
+        f"Caption: {caption}\n\n"
+        f"**Example output:**\n{example}\n\n"
+        f"{'Set emojis: `/emojis ' + name + ' 🚗,⚠️,🚦`' if not emojis else ''}"
+    )
 
 
 @client.on(events.NewMessage(pattern='/scan'))
@@ -328,7 +468,7 @@ async def scan_handler(event):
         return
     parts = event.text.split()
     if len(parts) < 2:
-        await event.respond("**Usage:** `/scan NAME`\n\nCounts ALL content in source channel")
+        await event.respond("**Usage:** `/scan NAME`")
         return
     
     name = parts[1].lower()
@@ -336,21 +476,17 @@ async def scan_handler(event):
         await event.respond(f"Channel `{name}` not found")
         return
     
-    if name in scan_tasks and not scan_tasks[name].done():
-        await event.respond(f"Scan already in progress for `{name}`")
-        return
-    
     config = CHANNELS[name]
     source = config.get('source_id')
     content_types = config.get('content_types', [])
     
-    status_msg = await event.respond(f"🔍 Scanning `{name}`...\n\nThis may take a while for large channels.")
+    status_msg = await event.respond(f"🔍 Scanning `{name}`...")
     
     async def progress_update(count, processed):
         try:
             await status_msg.edit(
                 f"🔍 Scanning `{name}`...\n\n"
-                f"Found: {count:,} matching content\n"
+                f"Found: {count:,} content\n"
                 f"Processed: ~{processed:,} messages"
             )
         except:
@@ -369,18 +505,16 @@ async def scan_handler(event):
         already_done = len(all_ids) - remaining
         
         await status_msg.edit(
-            f"✅ **Scan complete for `{name}`**\n\n"
-            f"📊 **Source content:** {len(all_ids):,}\n"
-            f"✓ Already forwarded: {already_done:,}\n"
+            f"✅ **Scan complete: `{name}`**\n\n"
+            f"📊 Source: {len(all_ids):,}\n"
+            f"✓ Forwarded: {already_done:,}\n"
             f"⏳ Remaining: {remaining:,}\n\n"
-            f"**Start:** `/go {name}`\n"
-            f"**Test first:** `/test {name}`"
+            f"**Start:** `/go {name}`"
         )
-        logger.info(f"[SCAN] {name}: {len(all_ids)} total, {remaining} remaining")
+        logger.info(f"[SCAN] {name}: {len(all_ids)} total")
         
     except Exception as e:
         await status_msg.edit(f"❌ Scan failed: {e}")
-        logger.error(f"[SCAN] {name}: {e}")
 
 
 @client.on(events.NewMessage(pattern='/progress'))
@@ -400,40 +534,35 @@ async def progress_handler(event):
     config = CHANNELS[name]
     source_total = config.get('source_total', 0)
     forwarded = config.get('total_forwarded', 0)
-    remaining = source_total - forwarded if source_total > 0 else 0
     
     if source_total > 0:
+        remaining = source_total - forwarded
         percent = (forwarded / source_total) * 100
         bar_filled = int(percent / 5)
         bar = "█" * bar_filled + "░" * (20 - bar_filled)
         
-        # Estimate time remaining
         interval = config.get('interval', 30)
         hours_left = (remaining * interval) / 60
         days_left = hours_left / 24
         
-        time_est = ""
         if days_left > 1:
             time_est = f"~{days_left:.1f} days"
         elif hours_left > 1:
             time_est = f"~{hours_left:.1f} hours"
         else:
-            time_est = f"~{remaining * interval} minutes"
+            time_est = f"~{remaining * interval} min"
         
         await event.respond(
             f"**Progress: {name}**\n\n"
             f"[{bar}] {percent:.1f}%\n\n"
-            f"📊 Source total: {source_total:,}\n"
+            f"📊 Source: {source_total:,}\n"
             f"✅ Forwarded: {forwarded:,}\n"
             f"⏳ Remaining: {remaining:,}\n"
-            f"⏱️ Est. time: {time_est}\n\n"
+            f"⏱️ Est: {time_est}\n\n"
             f"Status: {'🟢 Running' if config.get('enabled') else '🔴 Stopped'}"
         )
     else:
-        await event.respond(
-            f"**{name}** - Not scanned yet\n\n"
-            f"Run `/scan {name}` first to count source content"
-        )
+        await event.respond(f"Run `/scan {name}` first")
 
 
 @client.on(events.NewMessage(pattern='/test'))
@@ -466,20 +595,21 @@ async def test_handler(event):
             if msg.id in forwarded:
                 continue
             if should_forward(msg, content_types):
-                custom_caption = config.get('caption')
-                await send_as_new(dest, msg, custom_caption)
+                await send_as_new(dest, msg, config)
+                
+                # Show what was sent
+                caption = get_caption_with_emoji(config)
                 await event.respond(
                     f"✅ **Test SUCCESS!**\n\n"
-                    f"Forwarded 1 {get_content_type(msg)}\n"
-                    f"(Forward restriction bypassed)"
+                    f"Caption sent:\n{caption or '(no caption)'}"
                 )
                 logger.info(f"[TEST] {name}: OK")
                 return
         
-        await event.respond("No new matching content found in first 100 messages")
+        await event.respond("No new content found")
     except Exception as e:
         logger.error(f"[TEST] {name}: {e}")
-        await event.respond(f"❌ **Test FAILED:** {e}")
+        await event.respond(f"❌ **Failed:** {e}")
 
 
 @client.on(events.NewMessage(pattern='/go'))
@@ -501,18 +631,11 @@ async def go_handler(event):
         config = CHANNELS[name]
         
         if config.get('completed'):
-            await event.respond(
-                f"Channel `{name}` already completed!\n\n"
-                f"Use `/reset {name}` to start over"
-            )
+            await event.respond(f"Channel `{name}` completed! Use `/reset {name}`")
             return
         
         if not config.get('scanned'):
-            await event.respond(
-                f"⚠️ Channel `{name}` not scanned yet!\n\n"
-                f"Run `/scan {name}` first to count source content.\n"
-                f"This ensures no content is missed."
-            )
+            await event.respond(f"⚠️ Run `/scan {name}` first")
             return
         
         CHANNELS[name]['enabled'] = True
@@ -523,14 +646,11 @@ async def go_handler(event):
         
         source_total = config.get('source_total', 0)
         forwarded = config.get('total_forwarded', 0)
-        remaining = source_total - forwarded
         
         await event.respond(
             f"▶️ **Started `{name}`**\n\n"
-            f"Source: {source_total:,} content\n"
-            f"Forwarded: {forwarded:,}\n"
-            f"Remaining: {remaining:,}\n\n"
-            f"Check progress: `/progress {name}`"
+            f"Progress: {forwarded:,}/{source_total:,}\n"
+            f"Check: `/progress {name}`"
         )
         logger.info(f"[>] Started: {name}")
     else:
@@ -538,25 +658,22 @@ async def go_handler(event):
         skipped = []
         for name, config in CHANNELS.items():
             if config.get('completed'):
-                skipped.append(f"{name} (completed)")
+                skipped.append(f"{name} (done)")
                 continue
             if not config.get('scanned'):
                 skipped.append(f"{name} (not scanned)")
                 continue
-            if config.get('source_id') and config.get('dest_id'):
-                CHANNELS[name]['enabled'] = True
-                if name not in channel_tasks or channel_tasks[name].done():
-                    channel_tasks[name] = asyncio.create_task(forward_loop(name))
-                started.append(name)
+            CHANNELS[name]['enabled'] = True
+            if name not in channel_tasks or channel_tasks[name].done():
+                channel_tasks[name] = asyncio.create_task(forward_loop(name))
+            started.append(name)
         
         save_data()
-        
         msg = ""
         if started:
             msg += f"▶️ **Started:** {', '.join(started)}\n"
         if skipped:
             msg += f"\n⚠️ **Skipped:** {', '.join(skipped)}"
-        
         await event.respond(msg or "No channels to start")
 
 
@@ -571,13 +688,11 @@ async def stop_handler(event):
         if name not in CHANNELS:
             await event.respond(f"Channel `{name}` not found")
             return
-        
         CHANNELS[name]['enabled'] = False
         if name in channel_tasks:
             channel_tasks[name].cancel()
             del channel_tasks[name]
         save_data()
-        
         await event.respond(f"⏹️ Stopped `{name}`")
         logger.info(f"[X] Stopped: {name}")
     else:
@@ -587,7 +702,6 @@ async def stop_handler(event):
                 channel_tasks[name].cancel()
         channel_tasks.clear()
         save_data()
-        
         await event.respond("⏹️ **All stopped**")
         logger.info("[X] Stopped all")
 
@@ -596,7 +710,6 @@ async def stop_handler(event):
 async def list_handler(event):
     if event.sender_id != ADMIN_ID:
         return
-    
     if not CHANNELS:
         await event.respond("No channels. Use `/quicksetup`")
         return
@@ -604,21 +717,20 @@ async def list_handler(event):
     text = "**Channels:**\n\n"
     for name, config in CHANNELS.items():
         if config.get('completed'):
-            status = "✅ DONE"
+            status = "✅"
         elif config.get('enabled'):
-            status = "🟢 ON"
+            status = "🟢"
         else:
-            status = "🔴 OFF"
+            status = "🔴"
         
         source_total = config.get('source_total', 0)
         forwarded = config.get('total_forwarded', 0)
+        emojis = config.get('emojis', [])
         
-        if source_total > 0:
-            percent = (forwarded / source_total) * 100
-            text += f"**{name}** [{status}]\n"
-            text += f"  {forwarded:,}/{source_total:,} ({percent:.1f}%)\n\n"
-        else:
-            text += f"**{name}** [{status}] - Not scanned\n\n"
+        text += f"{status} **{name}**"
+        if emojis:
+            text += f" ({len(emojis)} emojis)"
+        text += f"\n   {forwarded:,}/{source_total:,}\n"
     
     await event.respond(text)
 
@@ -649,25 +761,19 @@ async def info_handler(event):
     
     source_total = config.get('source_total', 0)
     forwarded = config.get('total_forwarded', 0)
-    remaining = source_total - forwarded if source_total > 0 else 0
+    emojis = config.get('emojis', [])
+    caption = config.get('caption', '')
     
     text = f"**{name}** [{status}]\n\n"
     text += f"Source: `{config.get('source_id')}`\n"
     text += f"Dest: `{config.get('dest_id')}`\n"
     text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
     text += f"Content: {', '.join(config.get('content_types', []))}\n"
-    text += f"Caption: {config.get('caption') or 'None'}\n"
     text += f"Daily limit: {config.get('daily_limit')}\n\n"
-    
-    text += f"📊 **Progress:**\n"
-    text += f"Source total: {source_total:,}\n"
-    text += f"Forwarded: {forwarded:,}\n"
-    text += f"Remaining: {remaining:,}\n"
-    text += f"Today: {config.get('daily_count', 0)}\n"
-    
-    if source_total > 0:
-        percent = (forwarded / source_total) * 100
-        text += f"\nProgress: {percent:.1f}%"
+    text += f"**Caption:** {caption or 'None'}\n"
+    text += f"**Emojis:** {', '.join(emojis) if emojis else 'None'}\n\n"
+    text += f"📊 Progress: {forwarded:,}/{source_total:,}\n"
+    text += f"Today: {config.get('daily_count', 0)}"
     
     await event.respond(text)
 
@@ -677,7 +783,6 @@ async def stats_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     reset_daily_counts()
-    
     if not CHANNELS:
         await event.respond("No channels")
         return
@@ -685,7 +790,6 @@ async def stats_handler(event):
     text = f"**Stats - {datetime.now().strftime('%Y-%m-%d')}**\n\n"
     total_today = 0
     total_forwarded = 0
-    total_source = 0
     
     for name, config in CHANNELS.items():
         today = config.get('daily_count', 0)
@@ -699,18 +803,11 @@ async def stats_handler(event):
         else:
             status = "🔴"
         
-        text += f"{status} **{name}**\n"
-        text += f"   Today: {today} | Total: {forwarded:,}/{source:,}\n"
-        
+        text += f"{status} **{name}**: {today} today | {forwarded:,}/{source:,}\n"
         total_today += today
         total_forwarded += forwarded
-        total_source += source
     
-    text += f"\n**Summary:**\n"
-    text += f"Today: {total_today}\n"
-    text += f"Total forwarded: {total_forwarded:,}\n"
-    text += f"Total source: {total_source:,}"
-    
+    text += f"\n**Today:** {total_today}\n**Total:** {total_forwarded:,}"
     await event.respond(text)
 
 
@@ -722,12 +819,10 @@ async def interval_handler(event):
     if len(parts) < 4:
         await event.respond("**Usage:** `/interval NAME BASE VAR`")
         return
-    
     name = parts[1].lower()
     if name not in CHANNELS:
         await event.respond(f"Channel `{name}` not found")
         return
-    
     try:
         base = int(parts[2])
         var = int(parts[3])
@@ -750,46 +845,19 @@ async def content_handler(event):
     if len(parts) < 3:
         await event.respond("**Usage:** `/content NAME photos,videos`")
         return
-    
     name = parts[1].lower()
     if name not in CHANNELS:
         await event.respond(f"Channel `{name}` not found")
         return
-    
     valid = ['photos', 'videos', 'audio', 'docs', 'links']
     types = [t.strip() for t in parts[2].lower().split(',') if t.strip() in valid]
     if not types:
         await event.respond(f"Invalid. Use: {', '.join(valid)}")
         return
-    
     CHANNELS[name]['content_types'] = types
-    CHANNELS[name]['scanned'] = False  # Need to rescan with new types
+    CHANNELS[name]['scanned'] = False
     save_data()
     await event.respond(f"**Content:** {', '.join(types)}\n\n⚠️ Run `/scan {name}` again")
-
-
-@client.on(events.NewMessage(pattern='/caption'))
-async def caption_handler(event):
-    if event.sender_id != ADMIN_ID:
-        return
-    parts = event.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await event.respond("**Usage:** `/caption NAME text`\n**Clear:** `/caption NAME clear`")
-        return
-    
-    name = parts[1].lower()
-    if name not in CHANNELS:
-        await event.respond(f"Channel `{name}` not found")
-        return
-    
-    caption = parts[2]
-    if caption.lower() == 'clear':
-        CHANNELS[name]['caption'] = None
-        await event.respond("Caption cleared")
-    else:
-        CHANNELS[name]['caption'] = caption
-        await event.respond(f"**Caption:** {caption}")
-    save_data()
 
 
 @client.on(events.NewMessage(pattern='/limit'))
@@ -800,12 +868,10 @@ async def limit_handler(event):
     if len(parts) < 3:
         await event.respond("**Usage:** `/limit NAME NUMBER`")
         return
-    
     name = parts[1].lower()
     if name not in CHANNELS:
         await event.respond(f"Channel `{name}` not found")
         return
-    
     try:
         limit = int(parts[2])
         CHANNELS[name]['daily_limit'] = limit
@@ -823,16 +889,13 @@ async def remove_handler(event):
     if len(parts) < 2:
         await event.respond("**Usage:** `/remove NAME`")
         return
-    
     name = parts[1].lower()
     if name not in CHANNELS:
         await event.respond(f"Channel `{name}` not found")
         return
-    
     if name in channel_tasks:
         channel_tasks[name].cancel()
         del channel_tasks[name]
-    
     del CHANNELS[name]
     save_data()
     await event.respond(f"🗑️ Removed `{name}`")
@@ -845,20 +908,17 @@ async def reset_handler(event):
         return
     parts = event.text.split()
     if len(parts) < 2:
-        await event.respond("**Usage:** `/reset NAME`\n\nResets all progress and starts from beginning")
+        await event.respond("**Usage:** `/reset NAME`")
         return
-    
     name = parts[1].lower()
     if name not in CHANNELS:
         await event.respond(f"Channel `{name}` not found")
         return
-    
     CHANNELS[name]['completed'] = False
     CHANNELS[name]['forwarded_ids'] = []
     CHANNELS[name]['total_forwarded'] = 0
     CHANNELS[name]['daily_count'] = 0
     save_data()
-    
     await event.respond(f"🔄 Reset `{name}`\n\nRun `/scan {name}` then `/go {name}`")
     logger.info(f"[R] Reset: {name}")
 
@@ -874,11 +934,10 @@ async def forward_loop(name):
                 break
             
             if config.get('completed'):
-                logger.info(f"[{name}] Already completed")
                 break
             
             if config.get('daily_count', 0) >= config.get('daily_limit', DEFAULT_LIMIT):
-                logger.info(f"[{name}] Daily limit reached")
+                logger.info(f"[{name}] Daily limit")
                 await asyncio.sleep(3600)
                 continue
             
@@ -890,7 +949,6 @@ async def forward_loop(name):
                 break
             
             try:
-                # Get next batch of messages (oldest first)
                 messages = await client.get_messages(source, limit=100)
                 messages = list(reversed(messages))
                 forwarded_set = set(config.get('forwarded_ids', []))
@@ -904,11 +962,9 @@ async def forward_loop(name):
                     
                     found = True
                     try:
-                        custom_caption = config.get('caption')
-                        await send_as_new(dest, msg, custom_caption)
+                        await send_as_new(dest, msg, config)
                         
                         CHANNELS[name]['forwarded_ids'].append(msg.id)
-                        # Keep last 10000 IDs to manage memory
                         if len(CHANNELS[name]['forwarded_ids']) > 10000:
                             CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-10000:]
                         
@@ -929,7 +985,6 @@ async def forward_loop(name):
                     except Exception as e:
                         logger.error(f"[{name}] Send error: {e}")
                 
-                # Check if completed
                 if not found:
                     source_total = config.get('source_total', 0)
                     total_forwarded = config.get('total_forwarded', 0)
@@ -940,12 +995,11 @@ async def forward_loop(name):
                         save_data()
                         
                         await notify_admin(
-                            f"🎉 **Channel `{name}` COMPLETED!**\n\n"
-                            f"✅ All content forwarded!\n"
-                            f"📊 Total: {total_forwarded:,}/{source_total:,}\n\n"
-                            f"Use `/reset {name}` to start over"
+                            f"🎉 **`{name}` COMPLETED!**\n\n"
+                            f"✅ Total: {total_forwarded:,}/{source_total:,}\n\n"
+                            f"Use `/reset {name}` to restart"
                         )
-                        logger.info(f"[{name}] COMPLETED: {total_forwarded}/{source_total}")
+                        logger.info(f"[{name}] COMPLETED")
                         break
                 
             except Exception as e:
@@ -976,8 +1030,8 @@ async def auto_resume():
 
 async def main():
     print("=" * 40)
-    print("  MyFC Forwarder v4.7")
-    print("  Large Scale Edition")
+    print("  MyFC Forwarder v4.8")
+    print("  Random Emoji Edition")
     print("=" * 40)
     
     load_data()
