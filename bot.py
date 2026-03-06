@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MyFC Forwarder v4.5 - Persistent Edition
-Data saved to Supabase - survives crashes/restarts
+Data saved to Supabase via REST API - survives crashes/restarts
 Oldest first, no forward header, no original caption
 """
 
@@ -14,7 +14,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.sessions import StringSession
-from supabase import create_client
+import httpx
 
 # Suppress Telethon internal logs
 logging.getLogger('telethon').setLevel(logging.ERROR)
@@ -47,13 +47,19 @@ DEFAULT_VARIATION = 10
 DEFAULT_LIMIT = 100
 CHANNELS = {}
 
-# Supabase client
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 last_reset_date = None
 channel_tasks = {}
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+
+
+def get_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
 
 
 def fix_channel_id(channel_id):
@@ -68,7 +74,7 @@ def fix_channel_id(channel_id):
 
 
 def save_data():
-    """Save data to Supabase"""
+    """Save data to Supabase via REST API"""
     global CHANNELS, last_reset_date
     try:
         data = {
@@ -77,25 +83,38 @@ def save_data():
             'last_reset_date': last_reset_date.isoformat() if last_reset_date else None,
             'updated_at': datetime.now().isoformat()
         }
-        supabase.table('forwarder_data').upsert(data).execute()
+        url = f"{SUPABASE_URL}/rest/v1/forwarder_data?id=eq.main"
+        with httpx.Client() as http:
+            # Try update first
+            resp = http.patch(url, json=data, headers=get_headers())
+            if resp.status_code == 404 or resp.status_code == 400:
+                # Insert if not exists
+                url = f"{SUPABASE_URL}/rest/v1/forwarder_data"
+                http.post(url, json=data, headers=get_headers())
         logger.info("[DB] Saved")
     except Exception as e:
         logger.error(f"[DB] Save error: {e}")
 
 
 def load_data():
-    """Load data from Supabase"""
+    """Load data from Supabase via REST API"""
     global CHANNELS, last_reset_date
     try:
-        result = supabase.table('forwarder_data').select('*').eq('id', 'main').execute()
-        if result.data and len(result.data) > 0:
-            data = result.data[0]
-            CHANNELS = data.get('channels', {})
-            if data.get('last_reset_date'):
-                last_reset_date = datetime.fromisoformat(data['last_reset_date'])
-            logger.info(f"[DB] Loaded {len(CHANNELS)} channels")
-        else:
-            logger.info("[DB] No data found, starting fresh")
+        url = f"{SUPABASE_URL}/rest/v1/forwarder_data?id=eq.main&select=*"
+        with httpx.Client() as http:
+            resp = http.get(url, headers=get_headers())
+            if resp.status_code == 200:
+                result = resp.json()
+                if result and len(result) > 0:
+                    data = result[0]
+                    CHANNELS = data.get('channels', {})
+                    if data.get('last_reset_date'):
+                        last_reset_date = datetime.fromisoformat(data['last_reset_date'])
+                    logger.info(f"[DB] Loaded {len(CHANNELS)} channels")
+                else:
+                    logger.info("[DB] No data found, starting fresh")
+            else:
+                logger.warning(f"[DB] Load status: {resp.status_code}")
     except Exception as e:
         logger.warning(f"[DB] Load error: {e}")
 
@@ -559,7 +578,7 @@ async def forward_loop(name):
 
 async def auto_resume():
     """Auto-resume channels that were enabled before crash"""
-    await asyncio.sleep(5)  # Wait for startup
+    await asyncio.sleep(5)
     for name, config in CHANNELS.items():
         if config.get('enabled') and config.get('source_id') and config.get('dest_id'):
             if name not in channel_tasks or channel_tasks[name].done():
@@ -573,7 +592,6 @@ async def main():
     print("  Persistent Edition")
     print("=" * 40)
     
-    # Load saved data from Supabase
     load_data()
     logger.info(f"Admin: {ADMIN_ID}")
     logger.info(f"Channels: {len(CHANNELS)}")
@@ -582,7 +600,6 @@ async def main():
     me = await client.get_me()
     logger.info(f"Logged in: {me.first_name}")
     
-    # Auto-resume enabled channels
     asyncio.create_task(auto_resume())
     
     logger.info("Ready! Send /start")
