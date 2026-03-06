@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-MyFC Forwarder v4.4 - Oldest First Edition
-Forwards from oldest to newest (same order as source)
-No forward header, no original caption, clean logs
+MyFC Forwarder v4.5 - Persistent Edition
+Data saved to Supabase - survives crashes/restarts
+Oldest first, no forward header, no original caption
 """
 
 import asyncio
@@ -14,6 +14,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.sessions import StringSession
+from supabase import create_client
 
 # Suppress Telethon internal logs
 logging.getLogger('telethon').setLevel(logging.ERROR)
@@ -29,6 +30,8 @@ API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_STRING = os.environ.get('SESSION_STRING', '')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 
 if not API_ID or not API_HASH:
     raise ValueError("API_ID/API_HASH not set")
@@ -36,20 +39,17 @@ if not SESSION_STRING:
     raise ValueError("SESSION_STRING not set")
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID not set")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL/SUPABASE_KEY not set")
 
 DEFAULT_INTERVAL = 30
 DEFAULT_VARIATION = 10
 DEFAULT_LIMIT = 100
 CHANNELS = {}
 
-DATA_DIR = "/app/data"
-if not os.path.exists(DATA_DIR):
-    try:
-        os.makedirs(DATA_DIR)
-    except:
-        DATA_DIR = "."
+# Supabase client
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-DATA_FILE = os.path.join(DATA_DIR, "forwarder_data.json")
 last_reset_date = None
 channel_tasks = {}
 
@@ -68,26 +68,36 @@ def fix_channel_id(channel_id):
 
 
 def save_data():
+    """Save data to Supabase"""
+    global CHANNELS, last_reset_date
     try:
-        data = {'channels': CHANNELS, 'last_reset_date': last_reset_date.isoformat() if last_reset_date else None}
-        with open(DATA_FILE, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        data = {
+            'id': 'main',
+            'channels': CHANNELS,
+            'last_reset_date': last_reset_date.isoformat() if last_reset_date else None,
+            'updated_at': datetime.now().isoformat()
+        }
+        supabase.table('forwarder_data').upsert(data).execute()
+        logger.info("[DB] Saved")
     except Exception as e:
-        logger.error(f"Save error: {e}")
+        logger.error(f"[DB] Save error: {e}")
 
 
 def load_data():
+    """Load data from Supabase"""
     global CHANNELS, last_reset_date
     try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r') as f:
-                data = json.load(f)
+        result = supabase.table('forwarder_data').select('*').eq('id', 'main').execute()
+        if result.data and len(result.data) > 0:
+            data = result.data[0]
             CHANNELS = data.get('channels', {})
             if data.get('last_reset_date'):
                 last_reset_date = datetime.fromisoformat(data['last_reset_date'])
-            logger.info(f"Loaded {len(CHANNELS)} channels")
+            logger.info(f"[DB] Loaded {len(CHANNELS)} channels")
+        else:
+            logger.info("[DB] No data found, starting fresh")
     except Exception as e:
-        logger.warning(f"Load error: {e}")
+        logger.warning(f"[DB] Load error: {e}")
 
 
 def reset_daily_counts():
@@ -98,6 +108,7 @@ def reset_daily_counts():
             CHANNELS[name]['daily_count'] = 0
         last_reset_date = datetime.now()
         save_data()
+        logger.info("[DB] Daily counts reset")
 
 
 def get_random_interval(name):
@@ -153,7 +164,7 @@ async def start_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     await event.respond(
-        "**MyFC Forwarder v4.4**\n\n"
+        "**MyFC Forwarder v4.5** (Persistent)\n\n"
         "**SETUP:**\n"
         "`/quicksetup NAME SOURCE DEST INTERVAL VAR CONTENT`\n\n"
         "Example:\n"
@@ -168,7 +179,7 @@ async def start_handler(event):
         "`/list` `/info NAME` `/stats`\n\n"
         "**SETTINGS:**\n"
         "`/interval` `/content` `/caption` `/limit` `/remove`\n\n"
-        "**Note:** Forwards oldest first (same order as source)"
+        "Data saved to cloud - survives restarts!"
     )
 
 
@@ -245,12 +256,9 @@ async def test_handler(event):
     dest = config.get('dest_id')
     await event.respond(f"Testing `{name}` (oldest first)...")
     try:
-        # Get messages and reverse to oldest first
         messages = await client.get_messages(source, limit=10)
-        messages = list(reversed(messages))  # Oldest first
-        
+        messages = list(reversed(messages))
         forwarded = set(config.get('forwarded_ids', []))
-        
         for msg in messages:
             if msg.id in forwarded:
                 continue
@@ -361,7 +369,7 @@ async def info_handler(event):
     text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
     text += f"Content: {', '.join(config.get('content_types', []))}\n"
     text += f"Caption: {config.get('caption') or 'None (clean)'}\n"
-    text += f"Order: Oldest first\n"
+    text += f"Forwarded: {len(config.get('forwarded_ids', []))} messages\n"
     text += f"Today: {config.get('daily_count', 0)}/{config.get('daily_limit')}"
     await event.respond(text)
 
@@ -376,12 +384,15 @@ async def stats_handler(event):
         return
     text = f"**Stats - {datetime.now().strftime('%Y-%m-%d')}**\n\n"
     total = 0
+    total_forwarded = 0
     for name, config in CHANNELS.items():
         count = config.get('daily_count', 0)
+        forwarded = len(config.get('forwarded_ids', []))
         status = "ON" if config.get('enabled') else "OFF"
-        text += f"{name} [{status}]: {count}/{config.get('daily_limit')}\n"
+        text += f"{name} [{status}]: {count}/{config.get('daily_limit')} (total: {forwarded})\n"
         total += count
-    text += f"\n**Total:** {total}"
+        total_forwarded += forwarded
+    text += f"\n**Today:** {total}\n**All time:** {total_forwarded}"
     await event.respond(text)
 
 
@@ -514,12 +525,9 @@ async def forward_loop(name):
             if not source or not dest:
                 break
             try:
-                # Get messages and reverse to oldest first
                 messages = await client.get_messages(source, limit=100)
-                messages = list(reversed(messages))  # Oldest first
-                
+                messages = list(reversed(messages))
                 forwarded = set(config.get('forwarded_ids', []))
-                
                 for msg in messages:
                     if msg.id in forwarded:
                         continue
@@ -529,7 +537,7 @@ async def forward_loop(name):
                         custom_caption = config.get('caption')
                         await send_as_new(dest, msg, custom_caption)
                         CHANNELS[name]['forwarded_ids'].append(msg.id)
-                        CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-1000:]
+                        CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-2000:]
                         CHANNELS[name]['daily_count'] = config.get('daily_count', 0) + 1
                         save_data()
                         logger.info(f"[{name}] Sent #{CHANNELS[name]['daily_count']}")
@@ -549,17 +557,34 @@ async def forward_loop(name):
     logger.info(f"[{name}] Loop ended")
 
 
+async def auto_resume():
+    """Auto-resume channels that were enabled before crash"""
+    await asyncio.sleep(5)  # Wait for startup
+    for name, config in CHANNELS.items():
+        if config.get('enabled') and config.get('source_id') and config.get('dest_id'):
+            if name not in channel_tasks or channel_tasks[name].done():
+                channel_tasks[name] = asyncio.create_task(forward_loop(name))
+                logger.info(f"[AUTO] Resumed: {name}")
+
+
 async def main():
     print("=" * 40)
-    print("  MyFC Forwarder v4.4")
-    print("  Oldest First Edition")
+    print("  MyFC Forwarder v4.5")
+    print("  Persistent Edition")
     print("=" * 40)
+    
+    # Load saved data from Supabase
     load_data()
     logger.info(f"Admin: {ADMIN_ID}")
     logger.info(f"Channels: {len(CHANNELS)}")
+    
     await client.start()
     me = await client.get_me()
     logger.info(f"Logged in: {me.first_name}")
+    
+    # Auto-resume enabled channels
+    asyncio.create_task(auto_resume())
+    
     logger.info("Ready! Send /start")
     print("=" * 40)
     await client.run_until_disconnected()
