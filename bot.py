@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-MyFC Forwarder v4.9 - Fixed Oldest First
-- Properly finds oldest unforwarded content
-- Works with large channels (2 lakh+)
-- Random emoji in captions
+MyFC Forwarder v5.0 - Daily Reset Fixed
+- Fixed daily count reset
+- Manual /resetcount command
+- Debug command to check state
+- Timezone-safe reset logic
 """
 
 import asyncio
@@ -11,7 +12,7 @@ import random
 import json
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.sessions import StringSession
@@ -47,7 +48,7 @@ DEFAULT_VARIATION = 10
 DEFAULT_LIMIT = 100
 CHANNELS = {}
 
-last_reset_date = None
+last_reset_date_str = None  # Store as string YYYY-MM-DD
 channel_tasks = {}
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -73,8 +74,13 @@ def fix_channel_id(channel_id):
     return int(f"-{id_str}") if not id_str.startswith("-") else int(id_str)
 
 
+def get_today_str():
+    """Get today's date as string YYYY-MM-DD"""
+    return datetime.now().strftime('%Y-%m-%d')
+
+
 def save_data():
-    global CHANNELS, last_reset_date
+    global CHANNELS, last_reset_date_str
     try:
         save_channels = {}
         for name, config in CHANNELS.items():
@@ -84,7 +90,7 @@ def save_data():
         data = {
             'id': 'main',
             'channels': save_channels,
-            'last_reset_date': last_reset_date.isoformat() if last_reset_date else None,
+            'last_reset_date': last_reset_date_str,
             'updated_at': datetime.now().isoformat()
         }
         url = f"{SUPABASE_URL}/rest/v1/forwarder_data?id=eq.main"
@@ -98,7 +104,7 @@ def save_data():
 
 
 def load_data():
-    global CHANNELS, last_reset_date
+    global CHANNELS, last_reset_date_str
     try:
         url = f"{SUPABASE_URL}/rest/v1/forwarder_data?id=eq.main&select=*"
         with httpx.Client(timeout=30) as http:
@@ -108,9 +114,8 @@ def load_data():
                 if result and len(result) > 0:
                     data = result[0]
                     CHANNELS = data.get('channels', {})
-                    if data.get('last_reset_date'):
-                        last_reset_date = datetime.fromisoformat(data['last_reset_date'])
-                    logger.info(f"[DB] Loaded {len(CHANNELS)} channels")
+                    last_reset_date_str = data.get('last_reset_date')
+                    logger.info(f"[DB] Loaded {len(CHANNELS)} channels, last_reset: {last_reset_date_str}")
                 else:
                     logger.info("[DB] No data, starting fresh")
     except Exception as e:
@@ -118,13 +123,21 @@ def load_data():
 
 
 def reset_daily_counts():
-    global last_reset_date
-    today = datetime.now().date()
-    if last_reset_date is None or last_reset_date.date() < today:
+    """Reset daily counts if it's a new day"""
+    global last_reset_date_str
+    today = get_today_str()
+    
+    # Check if we need to reset
+    if last_reset_date_str != today:
+        logger.info(f"[RESET] New day! {last_reset_date_str} -> {today}")
         for name in CHANNELS:
+            old_count = CHANNELS[name].get('daily_count', 0)
             CHANNELS[name]['daily_count'] = 0
-        last_reset_date = datetime.now()
+            logger.info(f"[RESET] {name}: {old_count} -> 0")
+        last_reset_date_str = today
         save_data()
+        return True
+    return False
 
 
 def get_random_interval(name):
@@ -199,7 +212,6 @@ async def notify_admin(message):
 
 
 async def scan_source_channel(source, content_types, progress_callback=None):
-    """Scan ALL content from source (oldest first)"""
     all_ids = []
     offset_id = 0
     batch_count = 0
@@ -231,27 +243,18 @@ async def scan_source_channel(source, content_types, progress_callback=None):
             await asyncio.sleep(5)
             continue
     
-    # Reverse to get oldest first
     all_ids.reverse()
     return all_ids
 
 
-async def find_next_message_to_forward(source, content_types, forwarded_ids, last_forwarded_id=None):
-    """
-    Find the next unforwarded message (oldest first)
-    Searches through the channel until it finds one
-    """
+async def find_next_message_to_forward(source, content_types, forwarded_ids):
+    """Find the next unforwarded message (oldest first)"""
     forwarded_set = set(forwarded_ids)
     offset_id = 0
     batch_count = 0
     
-    # If we have a last forwarded ID, start searching from there
-    if last_forwarded_id:
-        offset_id = last_forwarded_id
-    
-    while batch_count < 100:  # Max 10,000 messages search
+    while batch_count < 100:
         try:
-            # Get messages older than offset_id (going backwards in time)
             if offset_id > 0:
                 messages = await client.get_messages(source, limit=100, max_id=offset_id)
             else:
@@ -260,7 +263,6 @@ async def find_next_message_to_forward(source, content_types, forwarded_ids, las
             if not messages:
                 break
             
-            # Check from oldest to newest in this batch
             for msg in reversed(messages):
                 if msg.id in forwarded_set:
                     continue
@@ -288,20 +290,21 @@ async def start_handler(event):
     if event.sender_id != ADMIN_ID:
         return
     await event.respond(
-        "**MyFC Forwarder v4.9**\n\n"
+        "**MyFC Forwarder v5.0**\n\n"
         "**SETUP:**\n"
         "`/quicksetup NAME SOURCE DEST INT VAR CONTENT`\n\n"
         "**CAPTION & EMOJI:**\n"
         "`/caption NAME text`\n"
         "`/emojis NAME 🚗,⚠️,🚦`\n\n"
-        "**BEFORE STARTING:**\n"
-        "`/scan NAME`\n\n"
         "**CONTROL:**\n"
-        "`/test` `/go` `/stop`\n\n"
+        "`/scan` `/test` `/go` `/stop`\n\n"
         "**INFO:**\n"
         "`/list` `/info` `/stats` `/progress`\n\n"
         "**SETTINGS:**\n"
-        "`/interval` `/content` `/limit`\n"
+        "`/interval` `/content` `/limit`\n\n"
+        "**TROUBLESHOOT:**\n"
+        "`/resetcount NAME` - Reset daily count\n"
+        "`/debug NAME` - Check internal state\n"
         "`/remove` `/reset`"
     )
 
@@ -352,7 +355,6 @@ async def quicksetup_handler(event):
             'total_forwarded': 0,
             'source_total': 0,
             'forwarded_ids': [],
-            'last_forwarded_id': None,
             'completed': False,
             'scanned': False,
         }
@@ -371,6 +373,91 @@ async def quicksetup_handler(event):
         await event.respond(f"Error: {e}")
 
 
+@client.on(events.NewMessage(pattern='/resetcount'))
+async def resetcount_handler(event):
+    """Manually reset daily count for a channel"""
+    if event.sender_id != ADMIN_ID:
+        return
+    parts = event.text.split()
+    
+    if len(parts) < 2:
+        await event.respond(
+            "**Usage:** `/resetcount NAME`\n\n"
+            "Resets daily count to 0 so forwarding resumes.\n\n"
+            "**Reset all:** `/resetcount all`"
+        )
+        return
+    
+    name = parts[1].lower()
+    
+    if name == 'all':
+        for ch_name in CHANNELS:
+            CHANNELS[ch_name]['daily_count'] = 0
+        save_data()
+        await event.respond("✅ Reset daily count for ALL channels to 0")
+        logger.info("[MANUAL] Reset all daily counts")
+        return
+    
+    if name not in CHANNELS:
+        await event.respond(f"Channel `{name}` not found")
+        return
+    
+    old_count = CHANNELS[name].get('daily_count', 0)
+    CHANNELS[name]['daily_count'] = 0
+    save_data()
+    
+    await event.respond(
+        f"✅ **Reset daily count for `{name}`**\n\n"
+        f"Before: {old_count}\n"
+        f"After: 0\n\n"
+        f"Forwarding will resume now!"
+    )
+    logger.info(f"[MANUAL] Reset {name} daily count: {old_count} -> 0")
+
+
+@client.on(events.NewMessage(pattern='/debug'))
+async def debug_handler(event):
+    """Show internal state for debugging"""
+    if event.sender_id != ADMIN_ID:
+        return
+    parts = event.text.split()
+    
+    if len(parts) < 2:
+        # Show global state
+        await event.respond(
+            f"**Global Debug Info**\n\n"
+            f"Today: `{get_today_str()}`\n"
+            f"Last reset: `{last_reset_date_str}`\n"
+            f"Channels: {len(CHANNELS)}\n"
+            f"Active tasks: {len(channel_tasks)}\n\n"
+            f"**Per channel:** `/debug NAME`"
+        )
+        return
+    
+    name = parts[1].lower()
+    if name not in CHANNELS:
+        await event.respond(f"Channel `{name}` not found")
+        return
+    
+    config = CHANNELS[name]
+    
+    await event.respond(
+        f"**Debug: {name}**\n\n"
+        f"enabled: `{config.get('enabled')}`\n"
+        f"completed: `{config.get('completed')}`\n"
+        f"scanned: `{config.get('scanned')}`\n\n"
+        f"daily_count: `{config.get('daily_count', 0)}`\n"
+        f"daily_limit: `{config.get('daily_limit', 100)}`\n"
+        f"total_forwarded: `{config.get('total_forwarded', 0)}`\n"
+        f"source_total: `{config.get('source_total', 0)}`\n\n"
+        f"forwarded_ids count: `{len(config.get('forwarded_ids', []))}`\n"
+        f"interval: `{config.get('interval')}+/-{config.get('variation')}`\n\n"
+        f"Today: `{get_today_str()}`\n"
+        f"Last reset: `{last_reset_date_str}`\n"
+        f"Task active: `{name in channel_tasks and not channel_tasks[name].done()}`"
+    )
+
+
 @client.on(events.NewMessage(pattern='/emojis'))
 async def emojis_handler(event):
     if event.sender_id != ADMIN_ID:
@@ -383,12 +470,7 @@ async def emojis_handler(event):
             "`/emojis NAME emoji1,emoji2,emoji3`\n\n"
             "**Example:**\n"
             "`/emojis ch1 🚗,⚠️,🚦,🛣️,🚨`\n\n"
-            "**Clear:**\n"
-            "`/emojis NAME clear`\n\n"
-            "**Sets:**\n"
-            "🚗 Traffic: `🚗,🚙,🚕,🚌,🏎️,🚓,🚑,🚒,🛣️,🚦,⚠️,🚨`\n"
-            "⚠️ Warning: `⚠️,🚨,❗,❌,🔴,⛔,🚫,🆘`\n"
-            "📢 General: `📢,📣,🔔,💡,✨,🌟,⭐,🔥,💥,👀`"
+            "**Clear:** `/emojis NAME clear`"
         )
         return
     
@@ -410,7 +492,7 @@ async def emojis_handler(event):
     if emoji_str.lower() == 'clear':
         CHANNELS[name]['emojis'] = []
         save_data()
-        await event.respond(f"✅ Emojis cleared for `{name}`")
+        await event.respond(f"✅ Emojis cleared")
         return
     
     emojis = [e.strip() for e in emoji_str.replace(' ', ',').split(',') if e.strip()]
@@ -422,7 +504,7 @@ async def emojis_handler(event):
     CHANNELS[name]['emojis'] = emojis
     save_data()
     
-    await event.respond(f"✅ **{len(emojis)} emojis set for `{name}`**\n\n{', '.join(emojis)}")
+    await event.respond(f"✅ **{len(emojis)} emojis set**\n\n{', '.join(emojis)}")
 
 
 @client.on(events.NewMessage(pattern='/caption'))
@@ -435,10 +517,7 @@ async def caption_handler(event):
         await event.respond(
             "**Usage:**\n"
             "`/caption NAME your text here`\n\n"
-            "**With emoji placeholder:**\n"
-            "`/caption NAME {emoji} Drive Safe | @Channel`\n\n"
-            "**Clear:**\n"
-            "`/caption NAME clear`"
+            "**Clear:** `/caption NAME clear`"
         )
         return
     
@@ -467,16 +546,7 @@ async def caption_handler(event):
     CHANNELS[name]['caption'] = caption
     save_data()
     
-    emojis = CHANNELS[name].get('emojis', [])
-    if emojis:
-        sample = random.choice(emojis)
-        if '{emoji}' in caption:
-            example = caption.replace('{emoji}', sample)
-        else:
-            example = f"{sample} {caption}"
-        await event.respond(f"✅ **Caption set**\n\nExample: {example}")
-    else:
-        await event.respond(f"✅ **Caption set:** {caption}\n\nAdd emojis: `/emojis {name} 🚗,⚠️`")
+    await event.respond(f"✅ **Caption set:** {caption}")
 
 
 @client.on(events.NewMessage(pattern='/scan'))
@@ -501,11 +571,7 @@ async def scan_handler(event):
     
     async def progress_update(count, processed):
         try:
-            await status_msg.edit(
-                f"🔍 Scanning `{name}`...\n\n"
-                f"Found: {count:,}\n"
-                f"Processed: ~{processed:,}"
-            )
+            await status_msg.edit(f"🔍 Scanning... Found: {count:,}")
         except:
             pass
     
@@ -528,8 +594,6 @@ async def scan_handler(event):
             f"⏳ Remaining: {remaining:,}\n\n"
             f"**Start:** `/go {name}`"
         )
-        logger.info(f"[SCAN] {name}: {len(all_ids)} total, {remaining} remaining")
-        
     except Exception as e:
         await status_msg.edit(f"❌ Scan failed: {e}")
 
@@ -551,6 +615,8 @@ async def progress_handler(event):
     config = CHANNELS[name]
     source_total = config.get('source_total', 0)
     forwarded = config.get('total_forwarded', 0)
+    daily_count = config.get('daily_count', 0)
+    daily_limit = config.get('daily_limit', 100)
     
     if source_total > 0:
         remaining = source_total - forwarded
@@ -558,8 +624,6 @@ async def progress_handler(event):
         bar_filled = int(percent / 5)
         bar = "█" * bar_filled + "░" * (20 - bar_filled)
         
-        interval = config.get('interval', 30)
-        daily_limit = config.get('daily_limit', 100)
         days_left = remaining / daily_limit if daily_limit > 0 else 0
         
         await event.respond(
@@ -569,6 +633,7 @@ async def progress_handler(event):
             f"✅ Forwarded: {forwarded:,}\n"
             f"⏳ Remaining: {remaining:,}\n"
             f"📅 Est: ~{days_left:.0f} days\n\n"
+            f"**Today:** {daily_count}/{daily_limit}\n"
             f"Status: {'🟢 Running' if config.get('enabled') else '🔴 Stopped'}"
         )
     else:
@@ -595,10 +660,9 @@ async def test_handler(event):
     content_types = config.get('content_types', [])
     forwarded_ids = config.get('forwarded_ids', [])
     
-    await event.respond(f"Testing `{name}`... Finding oldest unforwarded content...")
+    await event.respond(f"Testing `{name}`...")
     
     try:
-        # Find next message to forward
         msg = await find_next_message_to_forward(source, content_types, forwarded_ids)
         
         if msg:
@@ -609,11 +673,9 @@ async def test_handler(event):
                 f"Sent: {get_content_type(msg)}\n"
                 f"Caption: {caption or '(none)'}"
             )
-            logger.info(f"[TEST] {name}: OK - msg {msg.id}")
         else:
             await event.respond("No unforwarded content found")
     except Exception as e:
-        logger.error(f"[TEST] {name}: {e}")
         await event.respond(f"❌ **Failed:** {e}")
 
 
@@ -626,6 +688,9 @@ async def go_handler(event):
     if not CHANNELS:
         await event.respond("No channels. Use `/quicksetup`")
         return
+    
+    # Force check daily reset
+    reset_daily_counts()
     
     if len(parts) > 1:
         name = parts[1].lower()
@@ -651,10 +716,13 @@ async def go_handler(event):
         
         source_total = config.get('source_total', 0)
         forwarded = config.get('total_forwarded', 0)
+        daily_count = config.get('daily_count', 0)
+        daily_limit = config.get('daily_limit', 100)
         
         await event.respond(
             f"▶️ **Started `{name}`**\n\n"
-            f"Progress: {forwarded:,}/{source_total:,}"
+            f"Progress: {forwarded:,}/{source_total:,}\n"
+            f"Today: {daily_count}/{daily_limit}"
         )
         logger.info(f"[>] Started: {name}")
     else:
@@ -698,7 +766,6 @@ async def stop_handler(event):
             del channel_tasks[name]
         save_data()
         await event.respond(f"⏹️ Stopped `{name}`")
-        logger.info(f"[X] Stopped: {name}")
     else:
         for name in CHANNELS:
             CHANNELS[name]['enabled'] = False
@@ -728,8 +795,10 @@ async def list_handler(event):
         
         source_total = config.get('source_total', 0)
         forwarded = config.get('total_forwarded', 0)
+        daily = config.get('daily_count', 0)
+        limit = config.get('daily_limit', 100)
         
-        text += f"{status} **{name}**: {forwarded:,}/{source_total:,}\n"
+        text += f"{status} **{name}**: {forwarded:,}/{source_total:,} (Today: {daily}/{limit})\n"
     
     await event.respond(text)
 
@@ -762,17 +831,21 @@ async def info_handler(event):
     forwarded = config.get('total_forwarded', 0)
     emojis = config.get('emojis', [])
     caption = config.get('caption', '')
+    daily_count = config.get('daily_count', 0)
+    daily_limit = config.get('daily_limit', 100)
     
     text = f"**{name}** [{status}]\n\n"
     text += f"Source: `{config.get('source_id')}`\n"
     text += f"Dest: `{config.get('dest_id')}`\n"
     text += f"Interval: {config.get('interval')}+/-{config.get('variation')} min\n"
-    text += f"Content: {', '.join(config.get('content_types', []))}\n"
-    text += f"Daily limit: {config.get('daily_limit')}\n\n"
+    text += f"Content: {', '.join(config.get('content_types', []))}\n\n"
     text += f"Caption: {caption or 'None'}\n"
     text += f"Emojis: {len(emojis)} set\n\n"
     text += f"📊 Progress: {forwarded:,}/{source_total:,}\n"
-    text += f"Today: {config.get('daily_count', 0)}"
+    text += f"📅 Today: {daily_count}/{daily_limit}"
+    
+    if daily_count >= daily_limit:
+        text += " ⚠️ LIMIT REACHED"
     
     await event.respond(text)
 
@@ -781,12 +854,15 @@ async def info_handler(event):
 async def stats_handler(event):
     if event.sender_id != ADMIN_ID:
         return
+    
+    # Force check daily reset
     reset_daily_counts()
+    
     if not CHANNELS:
         await event.respond("No channels")
         return
     
-    text = f"**Stats - {datetime.now().strftime('%Y-%m-%d')}**\n\n"
+    text = f"**Stats - {get_today_str()}**\n\n"
     total_today = 0
     total_forwarded = 0
     
@@ -794,6 +870,7 @@ async def stats_handler(event):
         today = config.get('daily_count', 0)
         forwarded = config.get('total_forwarded', 0)
         source = config.get('source_total', 0)
+        limit = config.get('daily_limit', 100)
         
         if config.get('completed'):
             status = "✅"
@@ -802,7 +879,8 @@ async def stats_handler(event):
         else:
             status = "🔴"
         
-        text += f"{status} **{name}**: {today} today | {forwarded:,}/{source:,}\n"
+        limit_warn = " ⚠️" if today >= limit else ""
+        text += f"{status} **{name}**: {today}/{limit} today{limit_warn} | {forwarded:,}/{source:,}\n"
         total_today += today
         total_forwarded += forwarded
     
@@ -906,7 +984,7 @@ async def reset_handler(event):
         return
     parts = event.text.split()
     if len(parts) < 2:
-        await event.respond("**Usage:** `/reset NAME`")
+        await event.respond("**Usage:** `/reset NAME`\n\nResets ALL progress (starts from beginning)")
         return
     name = parts[1].lower()
     if name not in CHANNELS:
@@ -916,7 +994,6 @@ async def reset_handler(event):
     CHANNELS[name]['forwarded_ids'] = []
     CHANNELS[name]['total_forwarded'] = 0
     CHANNELS[name]['daily_count'] = 0
-    CHANNELS[name]['last_forwarded_id'] = None
     save_data()
     await event.respond(f"🔄 Reset `{name}`\n\nRun `/scan {name}` then `/go {name}`")
 
@@ -926,7 +1003,9 @@ async def forward_loop(name):
     
     while CHANNELS.get(name, {}).get('enabled', False):
         try:
+            # Check daily reset at start of each iteration
             reset_daily_counts()
+            
             config = CHANNELS.get(name)
             if not config:
                 break
@@ -934,8 +1013,11 @@ async def forward_loop(name):
             if config.get('completed'):
                 break
             
-            if config.get('daily_count', 0) >= config.get('daily_limit', DEFAULT_LIMIT):
-                logger.info(f"[{name}] Daily limit reached, waiting...")
+            daily_count = config.get('daily_count', 0)
+            daily_limit = config.get('daily_limit', DEFAULT_LIMIT)
+            
+            if daily_count >= daily_limit:
+                logger.info(f"[{name}] Daily limit {daily_count}/{daily_limit}, waiting 1 hour...")
                 await asyncio.sleep(3600)
                 continue
             
@@ -948,7 +1030,6 @@ async def forward_loop(name):
                 break
             
             try:
-                # Find next unforwarded message (oldest first)
                 msg = await find_next_message_to_forward(source, content_types, forwarded_ids)
                 
                 if msg:
@@ -959,24 +1040,23 @@ async def forward_loop(name):
                         if len(CHANNELS[name]['forwarded_ids']) > 10000:
                             CHANNELS[name]['forwarded_ids'] = CHANNELS[name]['forwarded_ids'][-10000:]
                         
-                        CHANNELS[name]['last_forwarded_id'] = msg.id
                         CHANNELS[name]['daily_count'] = config.get('daily_count', 0) + 1
                         CHANNELS[name]['total_forwarded'] = config.get('total_forwarded', 0) + 1
                         save_data()
                         
                         total = CHANNELS[name]['total_forwarded']
                         source_total = config.get('source_total', 0)
+                        new_daily = CHANNELS[name]['daily_count']
                         
                         if source_total > 0:
                             percent = (total / source_total) * 100
-                            logger.info(f"[{name}] #{total:,}/{source_total:,} ({percent:.1f}%)")
+                            logger.info(f"[{name}] #{total:,}/{source_total:,} ({percent:.1f}%) - Today: {new_daily}/{daily_limit}")
                         else:
-                            logger.info(f"[{name}] #{total:,}")
+                            logger.info(f"[{name}] #{total:,} - Today: {new_daily}/{daily_limit}")
                         
                     except Exception as e:
                         logger.error(f"[{name}] Send error: {e}")
                 else:
-                    # No more content to forward
                     source_total = config.get('source_total', 0)
                     total_forwarded = config.get('total_forwarded', 0)
                     
@@ -986,10 +1066,9 @@ async def forward_loop(name):
                     
                     await notify_admin(
                         f"🎉 **`{name}` COMPLETED!**\n\n"
-                        f"✅ Total: {total_forwarded:,}/{source_total:,}\n\n"
-                        f"Use `/reset {name}` to restart"
+                        f"✅ Total: {total_forwarded:,}/{source_total:,}"
                     )
-                    logger.info(f"[{name}] COMPLETED: {total_forwarded}")
+                    logger.info(f"[{name}] COMPLETED")
                     break
                 
             except Exception as e:
@@ -1010,6 +1089,7 @@ async def forward_loop(name):
 
 async def auto_resume():
     await asyncio.sleep(5)
+    reset_daily_counts()  # Check reset on startup
     for name, config in CHANNELS.items():
         if config.get('enabled') and not config.get('completed'):
             if config.get('source_id') and config.get('dest_id'):
@@ -1020,13 +1100,15 @@ async def auto_resume():
 
 async def main():
     print("=" * 40)
-    print("  MyFC Forwarder v4.9")
-    print("  Fixed Oldest First")
+    print("  MyFC Forwarder v5.0")
+    print("  Daily Reset Fixed")
     print("=" * 40)
     
     load_data()
     logger.info(f"Admin: {ADMIN_ID}")
     logger.info(f"Channels: {len(CHANNELS)}")
+    logger.info(f"Last reset: {last_reset_date_str}")
+    logger.info(f"Today: {get_today_str()}")
     
     await client.start()
     me = await client.get_me()
